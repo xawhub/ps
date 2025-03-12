@@ -1,0 +1,85 @@
+// Interfejs do tworzenia hierarchii PropertySet w eScript Siebel
+function PropertySetBuilder() {
+    this.root = TheApplication().NewPropertySet();
+    this.current = this.root;
+}
+
+// Ustawia typ głównego PropertySet
+PropertySetBuilder.prototype.setType = function(type) {
+    this.root.SetType(type);
+    return this;
+};
+
+// Pobiera typ bieżącego PropertySet
+PropertySetBuilder.prototype.getType = function() {
+    return this.current.GetType();
+};
+
+// Dodaje właściwość do bieżącego PropertySet
+PropertySetBuilder.prototype.addProperty = function(name, value) {
+    this.current.SetProperty(name, value);
+    return this;
+};
+
+// Pobiera wartość właściwości z bieżącego PropertySet
+PropertySetBuilder.prototype.getProperty = function(name) {
+    return this.current.GetProperty(name);
+};
+
+// Tworzy i przechodzi do nowego zagnieżdżonego PropertySet
+PropertySetBuilder.prototype.addChild = function(type) {
+    var child = TheApplication().NewPropertySet();
+    child.SetType(type);
+    this.current.AddChild(child);
+    this.current = child;
+    return this;
+};
+
+// Pobiera liczbę dzieci w bieżącym PropertySet
+PropertySetBuilder.prototype.getChildCount = function() {
+    return this.current.GetChildCount();
+};
+
+// Wraca do nadrzędnego PropertySet
+PropertySetBuilder.prototype.up = function() {
+    var parent = this.findParent(this.root, this.current);
+    if (parent) {
+        this.current = parent;
+    }
+    return this;
+};
+
+// Pobiera finalny PropertySet
+PropertySetBuilder.prototype.get = function() {
+    return this.root;
+};
+
+// Znajduje nadrzędny PropertySet dla podanego dziecka
+PropertySetBuilder.prototype.findParent = function(parent, child) {
+    for (var i = 0; i < parent.GetChildCount(); i++) {
+        var temp = parent.GetChild(i);
+        if (temp === child) {
+            return parent;
+        }
+        var found = this.findParent(temp, child);
+        if (found) {
+            return found;
+        }
+    }
+    return null;
+};
+
+// Przykład użycia
+function TestPropertySetBuilder() {
+    var builder = new PropertySetBuilder();
+    var ps = builder.setType("Root")
+        .addProperty("Name", "SiebelRoot")
+        .addChild("Child1")
+        .addProperty("ChildProp", "Value1")
+        .up()
+        .addChild("Child2")
+        .addProperty("AnotherProp", "Value2")
+        .get();
+    
+    TheApplication().RaiseErrorText(ps.ToString()); // Debugowanie
+}
