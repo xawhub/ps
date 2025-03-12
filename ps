@@ -1,4 +1,4 @@
-// Interfejs do tworzenia hierarchii PropertySet w eScript Siebel
+// Business Service do tworzenia hierarchii PropertySet w eScript Siebel
 function PropertySetBuilder() {
     this.root = TheApplication().NewPropertySet();
     this.current = this.root;
@@ -69,17 +69,21 @@ PropertySetBuilder.prototype.findParent = function(parent, child) {
     return null;
 };
 
-// Przykład użycia
-function TestPropertySetBuilder() {
-    var builder = new PropertySetBuilder();
-    var ps = builder.setType("Root")
-        .addProperty("Name", "SiebelRoot")
-        .addChild("Child1")
-        .addProperty("ChildProp", "Value1")
-        .up()
-        .addChild("Child2")
-        .addProperty("AnotherProp", "Value2")
-        .get();
-    
-    TheApplication().RaiseErrorText(ps.ToString()); // Debugowanie
+// Implementacja Business Service
+function Service_PreInvokeMethod(MethodName, Inputs, Outputs) {
+    if (MethodName == "BuildPropertySet") {
+        var builder = new PropertySetBuilder();
+        var ps = builder.setType("Root")
+            .addProperty("Name", "SiebelRoot")
+            .addChild("Child1")
+            .addProperty("ChildProp", "Value1")
+            .up()
+            .addChild("Child2")
+            .addProperty("AnotherProp", "Value2")
+            .get();
+        
+        Outputs.AddChild(ps);
+        return CancelOperation;
+    }
+    return ContinueOperation;
 }
