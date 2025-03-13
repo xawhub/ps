@@ -37,6 +37,14 @@ PropertySetBuilder.prototype.addChild = function(type) {
     return this;
 };
 
+// Tworzy i dodaje nowy PropertySet do podanego rodzica
+PropertySetBuilder.prototype.addChildToParent = function(parent, type) {
+    var child = TheApplication().NewPropertySet();
+    child.SetType(type);
+    parent.AddChild(child);
+    return child;
+};
+
 // Pobiera liczbę dzieci w bieżącym PropertySet
 PropertySetBuilder.prototype.getChildCount = function() {
     return this.current.GetChildCount();
@@ -71,26 +79,32 @@ PropertySetBuilder.prototype.findParent = function(parent, child) {
     return null;
 };
 
-// Budowanie PropertySet na podstawie Inputs
 PropertySetBuilder.prototype.buildFromInputs = function(inputs) {
     var rootType = inputs.GetProperty("RootType") || "Root";
     this.setType(rootType);
-    
+
+    var parentMap = {}; // Słownik przechowujący referencje do rodziców
+    parentMap["Root"] = this.root;
+
     var childIndex = 0;
     while (inputs.GetProperty("Child" + childIndex + "Type")) {
         var childType = inputs.GetProperty("Child" + childIndex + "Type");
-        this.addChild(childType);
-        
+        var parentType = inputs.GetProperty("Child" + childIndex + "Parent") || "Root";
+
+        var parent = parentMap[parentType] || this.root;
+        var child = this.addChildToParent(parent, childType);
+
+        parentMap[childType] = child; // Zapisujemy referencję do nowego dziecka
+
         var propIndex = 0;
         while (inputs.GetProperty("Child" + childIndex + "Prop" + propIndex + "Name")) {
             var propName = inputs.GetProperty("Child" + childIndex + "Prop" + propIndex + "Name");
             var propValue = inputs.GetProperty("Child" + childIndex + "Prop" + propIndex + "Value");
             if (propName && propValue) {
-                this.addProperty(propName, propValue);
+                child.SetProperty(propName, propValue);
             }
             propIndex++;
         }
-        this.up();
         childIndex++;
     }
     return this;
@@ -110,6 +124,17 @@ function Service_PreInvokeMethod(MethodName, Inputs, Outputs) {
 
 
 function CallPropertySetService() {
+    inputs.SetProperty("Child0Type", "ParentNode");
+    inputs.SetProperty("Child0Parent", "Root");
+
+    inputs.SetProperty("Child1Type", "ChildNode1");
+    inputs.SetProperty("Child1Parent", "ParentNode");
+
+    inputs.SetProperty("Child2Type", "ChildNode2");
+    inputs.SetProperty("Child2Parent", "ParentNode");
+
+    inputs.SetProperty("Child3Type", "GrandChild");
+    inputs.SetProperty("Child3Parent", "ChildNode1");
     var svc = TheApplication().GetService("PropertySetService"); // Pobranie Business Service
     var inputs = TheApplication().NewPropertySet();
     var outputs = TheApplication().NewPropertySet();
