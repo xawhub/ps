@@ -69,21 +69,71 @@ PropertySetBuilder.prototype.findParent = function(parent, child) {
     return null;
 };
 
+// Budowanie PropertySet na podstawie Inputs
+PropertySetBuilder.prototype.buildFromInputs = function(inputs) {
+    var rootType = inputs.GetProperty("RootType") || "Root";
+    this.setType(rootType);
+    
+    var childCount = inputs.GetProperty("ChildCount") || 0;
+    for (var i = 0; i < childCount; i++) {
+        var childType = inputs.GetProperty("Child" + i + "Type") || "Child" + i;
+        this.addChild(childType);
+        
+        var propCount = inputs.GetProperty("Child" + i + "PropCount") || 0;
+        for (var j = 0; j < propCount; j++) {
+            var propName = inputs.GetProperty("Child" + i + "Prop" + j + "Name");
+            var propValue = inputs.GetProperty("Child" + i + "Prop" + j + "Value");
+            if (propName && propValue) {
+                this.addProperty(propName, propValue);
+            }
+        }
+        this.up();
+    }
+    return this;
+};
+
 // Implementacja Business Service
 function Service_PreInvokeMethod(MethodName, Inputs, Outputs) {
     if (MethodName == "BuildPropertySet") {
         var builder = new PropertySetBuilder();
-        var ps = builder.setType("Root")
-            .addProperty("Name", "SiebelRoot")
-            .addChild("Child1")
-            .addProperty("ChildProp", "Value1")
-            .up()
-            .addChild("Child2")
-            .addProperty("AnotherProp", "Value2")
-            .get();
-        
-        Outputs.AddChild(ps);
+        builder.buildFromInputs(Inputs);
+        Outputs.AddChild(builder.get());
         return CancelOperation;
     }
     return ContinueOperation;
+}
+
+
+
+function CallPropertySetService() {
+    var svc = TheApplication().GetService("PropertySetService"); // Pobranie Business Service
+    var inputs = TheApplication().NewPropertySet();
+    var outputs = TheApplication().NewPropertySet();
+
+    // Definiowanie dynamicznej struktury PropertySet
+    inputs.SetProperty("RootType", "CustomRoot");
+    inputs.SetProperty("ChildCount", "2");
+
+    // Definiowanie pierwszego dziecka
+    inputs.SetProperty("Child0Type", "FirstChild");
+    inputs.SetProperty("Child0PropCount", "2");
+    inputs.SetProperty("Child0Prop0Name", "FirstName");
+    inputs.SetProperty("Child0Prop0Value", "John");
+    inputs.SetProperty("Child0Prop1Name", "LastName");
+    inputs.SetProperty("Child0Prop1Value", "Doe");
+
+    // Definiowanie drugiego dziecka
+    inputs.SetProperty("Child1Type", "SecondChild");
+    inputs.SetProperty("Child1PropCount", "1");
+    inputs.SetProperty("Child1Prop0Name", "Age");
+    inputs.SetProperty("Child1Prop0Value", "30");
+
+    // Wywołanie Business Service
+    svc.InvokeMethod("BuildPropertySet", inputs, outputs);
+
+    // Pobranie wynikowego PropertySet
+    var resultPS = outputs.GetChild(0);
+    
+    // Debugowanie - wyświetlenie struktury PropertySet
+    TheApplication().RaiseErrorText(resultPS.ToString());
 }
