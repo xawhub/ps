@@ -1,0 +1,212 @@
+// Business Service do tworzenia hierarchii PropertySet w eScript Siebel
+function PropertySetBuilder() {
+    this.root = TheApplication().NewPropertySet();
+    this.root.SetType("Root");
+    this.childIndex = 0; // Dynamiczny licznik dzieci
+}
+
+// Tworzy i dodaje nowy PropertySet do podanego rodzica
+PropertySetBuilder.prototype.addChildToParent = function(parent, type) {
+    if (!parent || typeof parent.AddChild !== "function") {
+        TheApplication().RaiseErrorText("Błąd: Nie znaleziono prawidłowego rodzica dla typu " + type);
+    }
+
+    var child = TheApplication().NewPropertySet();
+    child.SetType(type);
+    parent.AddChild(child);
+    return child;
+};
+
+// Pobiera wartość właściwości po typie i indeksie w ramach danego rodzica
+PropertySetBuilder.prototype.getPropertyByTypeAndIndex = function(parentType, index, propName) {
+    var parentNode = this.findPropertySetByType(parentType);
+    if (parentNode && index < parentNode.GetChildCount()) {
+        return parentNode.GetChild(index).GetProperty(propName);
+    }
+    return null;
+};
+
+// Ustawia wartość właściwości po typie i indeksie w ramach danego rodzica
+PropertySetBuilder.prototype.setPropertyByTypeAndIndex = function(parentType, index, propName, propValue) {
+    var parentNode = this.findPropertySetByType(parentType);
+    if (parentNode && index < parentNode.GetChildCount()) {
+        parentNode.GetChild(index).SetProperty(propName, propValue);
+    }
+};
+
+// Dodaje cały PropertySet jako dziecko do wskazanego rodzica (po typie)
+PropertySetBuilder.prototype.addPropertySetAsChild = function(parentType, newPropertySet) {
+    var parentNode = this.findPropertySetByType(parentType);
+    if (parentNode) {
+        parentNode.AddChild(newPropertySet);
+    }
+};
+
+// Pobiera PropertySet po indeksie w ramach wskazanego rodzica
+PropertySetBuilder.prototype.getPropertySetByIndex = function(parentType, index) {
+    var parentNode = this.findPropertySetByType(parentType);
+    if (parentNode && index < parentNode.GetChildCount()) {
+        return parentNode.GetChild(index);
+    }
+    return null;
+};
+
+// Znajduje PropertySet po typie (pierwszy znaleziony)
+PropertySetBuilder.prototype.findPropertySetByType = function(type) {
+    return this.findByType(this.root, type);
+};
+
+// Rekurencyjne wyszukiwanie PropertySet po typie
+PropertySetBuilder.prototype.findByType = function(node, type) {
+    if (node.GetType() === type) {
+        return node;
+    }
+
+    for (var i = 0; i < node.GetChildCount(); i++) {
+        var found = this.findByType(node.GetChild(i), type);
+        if (found) {
+            return found;
+        }
+    }
+    return null;
+};
+
+// Budowanie PropertySet na podstawie Inputs
+PropertySetBuilder.prototype.buildFromInputs = function(inputs) {
+    var rootType = inputs.GetProperty("RootType") || "Root"; 
+    this.root.SetType(rootType);
+
+    var parentMap = { "Root": this.root }; // Mapa rodziców
+
+    var childIndex = 0;
+    while (inputs.GetProperty("Child" + childIndex + "Type")) {
+        var childType = inputs.GetProperty("Child" + childIndex + "Type");
+        var parentType = inputs.GetProperty("Child" + childIndex + "Parent") || "Root"; 
+        var parent = parentMap[parentType];
+
+        if (!parent) {  
+            TheApplication().RaiseErrorText("Błąd: Nie znaleziono rodzica '" + parentType + "' dla '" + childType + "'.");
+        }
+
+        var child = this.addChildToParent(parent, childType);
+        parentMap[childType] = child;
+
+        var propIndex = 0;
+        while (inputs.GetProperty("Child" + childIndex + "Prop" + propIndex + "Name")) {
+            var propName = inputs.GetProperty("Child" + childIndex + "Prop" + propIndex + "Name");
+            var propValue = inputs.GetProperty("Child" + childIndex + "Prop" + propIndex + "Value");
+            if (propName && propValue) {
+                child.SetProperty(propName, propValue);
+            }
+            propIndex++;
+        }
+        childIndex++;
+    }
+    return this;
+};
+
+// Pobiera finalny PropertySet
+PropertySetBuilder.prototype.get = function() {
+    return this.root;
+};
+
+// Implementacja Business Service
+function Service_PreInvokeMethod(MethodName, Inputs, Outputs) {
+    var builder = new PropertySetBuilder();
+
+    if (MethodName == "BuildPropertySet") {
+        builder.buildFromInputs(Inputs);
+        Outputs.AddChild(builder.get());
+        return CancelOperation;
+
+    } else if (MethodName == "GetPropertyByTypeAndIndex") {
+        var parentType = Inputs.GetProperty("ParentType");
+        var index = ToNumber(Inputs.GetProperty("Index"));
+        var propName = Inputs.GetProperty("Property");
+        var value = builder.getPropertyByTypeAndIndex(parentType, index, propName);
+        Outputs.SetProperty("Value", value);
+        return CancelOperation;
+
+    } else if (MethodName == "SetPropertyByTypeAndIndex") {
+        var parentType = Inputs.GetProperty("ParentType");
+        var index = ToNumber(Inputs.GetProperty("Index"));
+        var propName = Inputs.GetProperty("Property");
+        var propValue = Inputs.GetProperty("Value");
+        builder.setPropertyByTypeAndIndex(parentType, index, propName, propValue);
+        return CancelOperation;
+
+    } else if (MethodName == "AddPropertySetAsChild") {
+        var parentType = Inputs.GetProperty("ParentType");
+        var newPropertySet = Inputs.GetChild(0);
+        builder.addPropertySetAsChild(parentType, newPropertySet);
+        return CancelOperation;
+
+    } else if (MethodName == "GetPropertySetByIndex") {
+        var parentType = Inputs.GetProperty("ParentType");
+        var index = ToNumber(Inputs.GetProperty("Index"));
+        var childPS = builder.getPropertySetByIndex(parentType, index);
+        if (childPS) {
+            Outputs.AddChild(childPS);
+        }
+        return CancelOperation;
+    }
+
+    return ContinueOperation;
+}
+
+
+
+
+var value = builder.getPropertyByTypeAndIndex("CustomerList", 1, "FirstName");
+
+builder.setPropertyByTypeAndIndex("CustomerList", 1, "LastName", "Doe");
+
+var newPS = TheApplication().NewPropertySet();
+newPS.SetType("Order");
+newPS.SetProperty("OrderId", "12345");
+
+builder.addPropertySetAsChild("CustomerList", newPS);
+
+
+var boService = TheApplication().GetService("PropertySetService");
+var inputs = TheApplication().NewPropertySet();
+var outputs = TheApplication().NewPropertySet();
+
+// Definicja struktury Root -> 2 dzieci -> każde ma 1 dziecko
+inputs.SetProperty("RootType", "Root");
+
+// Pierwsze dziecko Roota
+inputs.SetProperty("Child0Type", "Child1");
+inputs.SetProperty("Child0Parent", "Root");
+
+// Dziecko Child1
+inputs.SetProperty("Child1Type", "SubChild1");
+inputs.SetProperty("Child1Parent", "Child1");
+
+// Drugie dziecko Roota
+inputs.SetProperty("Child2Type", "Child2");
+inputs.SetProperty("Child2Parent", "Root");
+
+// Dziecko Child2
+inputs.SetProperty("Child3Type", "SubChild2");
+inputs.SetProperty("Child3Parent", "Child2");
+
+// Wywołanie Business Service
+boService.InvokeMethod("BuildPropertySet", inputs, outputs);
+
+// Pobranie utworzonego PropertySeta
+var rootPropertySet = outputs.GetChild(0);
+
+
+var inputs2 = TheApplication().NewPropertySet();
+var outputs2 = TheApplication().NewPropertySet();
+
+inputs2.SetProperty("ParentType", "Root");
+inputs2.SetProperty("Index", "1"); // Drugie dziecko Roota (Child2)
+
+boService.InvokeMethod("GetPropertySetByIndex", inputs2, outputs2);
+
+// Pobranie Child2 (z jego dzieckiem)
+var child2PropertySet = outputs2.GetChild(0);
+
+
