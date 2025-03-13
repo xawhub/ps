@@ -2,6 +2,7 @@
 function PropertySetBuilder() {
     this.root = TheApplication().NewPropertySet();
     this.current = this.root;
+    this.childIndex = 0; // Dynamiczny licznik dzieci
 }
 
 // Ustawia typ głównego PropertySet
@@ -32,6 +33,7 @@ PropertySetBuilder.prototype.addChild = function(type) {
     child.SetType(type);
     this.current.AddChild(child);
     this.current = child;
+    this.childIndex++;
     return this;
 };
 
@@ -74,20 +76,22 @@ PropertySetBuilder.prototype.buildFromInputs = function(inputs) {
     var rootType = inputs.GetProperty("RootType") || "Root";
     this.setType(rootType);
     
-    var childCount = inputs.GetProperty("ChildCount") || 0;
-    for (var i = 0; i < childCount; i++) {
-        var childType = inputs.GetProperty("Child" + i + "Type") || "Child" + i;
+    var childIndex = 0;
+    while (inputs.GetProperty("Child" + childIndex + "Type")) {
+        var childType = inputs.GetProperty("Child" + childIndex + "Type");
         this.addChild(childType);
         
-        var propCount = inputs.GetProperty("Child" + i + "PropCount") || 0;
-        for (var j = 0; j < propCount; j++) {
-            var propName = inputs.GetProperty("Child" + i + "Prop" + j + "Name");
-            var propValue = inputs.GetProperty("Child" + i + "Prop" + j + "Value");
+        var propIndex = 0;
+        while (inputs.GetProperty("Child" + childIndex + "Prop" + propIndex + "Name")) {
+            var propName = inputs.GetProperty("Child" + childIndex + "Prop" + propIndex + "Name");
+            var propValue = inputs.GetProperty("Child" + childIndex + "Prop" + propIndex + "Value");
             if (propName && propValue) {
                 this.addProperty(propName, propValue);
             }
+            propIndex++;
         }
         this.up();
+        childIndex++;
     }
     return this;
 };
