@@ -19,7 +19,10 @@ PropertySetBuilder.prototype.addChildToParent = function(parent, type) {
 
 // Budowanie PropertySet na podstawie Inputs
 PropertySetBuilder.prototype.buildFromInputs = function(inputs) {
-    var rootType = inputs.GetProperty("RootType") || "Root";
+    var rootType = inputs.GetProperty("RootType");
+    if (!rootType || rootType == "") {
+        rootType = "Root"; // Domyślny typ, jeśli nie podano RootType
+    }
     this.root.SetType(rootType);
 
     var parentMap = { "Root": this.root }; // Inicjalizacja Root jako rodzica
@@ -27,12 +30,16 @@ PropertySetBuilder.prototype.buildFromInputs = function(inputs) {
     var childIndex = 0;
     while (inputs.GetProperty("Child" + childIndex + "Type")) {
         var childType = inputs.GetProperty("Child" + childIndex + "Type");
-        var parentType = inputs.GetProperty("Child" + childIndex + "Parent") || "Root";
 
-        var parent = parentMap[parentType]; // Pobierz rodzica z mapy
+        var parentType = inputs.GetProperty("Child" + childIndex + "Parent");
+        if (!parentType || parentType == "") {
+            parentType = "Root"; // Domyślny rodzic, jeśli brak wartości
+        }
+
+        var parent = parentMap[parentType]; // Pobranie rodzica z mapy
 
         if (!parent) {  
-            TheApplication().RaiseErrorText("Błąd: Nie znaleziono rodzica '" + parentType + "' dla '" + childType + "'");
+            TheApplication().RaiseErrorText("Błąd: Nie znaleziono rodzica '" + parentType + "' dla '" + childType + "'. Sprawdź konfigurację wejściową.");
         }
 
         var child = this.addChildToParent(parent, childType);
@@ -68,3 +75,41 @@ function Service_PreInvokeMethod(MethodName, Inputs, Outputs) {
     }
     return ContinueOperation;
 }
+
+
+
+var svc = TheApplication().GetService("CallPropertySetService");
+var inputs = TheApplication().NewPropertySet();
+var outputs = TheApplication().NewPropertySet();
+
+// Konfiguracja hierarchii
+inputs.SetProperty("RootType", "Order");
+
+// Pierwszy poziom
+inputs.SetProperty("Child0Type", "Customer");
+inputs.SetProperty("Child0Parent", "Root");
+
+inputs.SetProperty("Child1Type", "Product");
+inputs.SetProperty("Child1Parent", "Root");
+
+// Drugi poziom (dziecko "Customer")
+inputs.SetProperty("Child2Type", "Address");
+inputs.SetProperty("Child2Parent", "Customer");
+
+// Dodawanie właściwości do "Customer"
+inputs.SetProperty("Child0Prop0Name", "FirstName");
+inputs.SetProperty("Child0Prop0Value", "John");
+
+inputs.SetProperty("Child0Prop1Name", "LastName");
+inputs.SetProperty("Child0Prop1Value", "Doe");
+
+// Dodawanie właściwości do "Address"
+inputs.SetProperty("Child2Prop0Name", "City");
+inputs.SetProperty("Child2Prop0Value", "New York");
+
+// Uruchomienie Business Service
+svc.InvokeMethod("BuildPropertySet", inputs, outputs);
+
+// Pobranie wyniku
+var resultPS = outputs.GetChild(0);
+TheApplication().RaiseErrorText(resultPS.GetType()); // Powinno zwrócić "Order"
