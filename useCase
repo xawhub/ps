@@ -1,0 +1,138 @@
+Tworzenie struktury PropertySet (Root → Dzieci → Wnuki)
+
+var boService = TheApplication().GetService("PropertySetService");
+var inputs = TheApplication().NewPropertySet();
+var outputs = TheApplication().NewPropertySet();
+
+// Definicja struktury Root -> 2 dzieci -> każde ma 1 dziecko
+inputs.SetProperty("RootType", "Root");
+
+// Pierwsze dziecko Roota (Child1)
+inputs.SetProperty("Child0Type", "Child1");
+inputs.SetProperty("Child0Parent", "Root");
+inputs.SetProperty("Child0Prop0Name", "Name");
+inputs.SetProperty("Child0Prop0Value", "First Child");
+inputs.SetProperty("Child0Prop1Name", "ID");
+inputs.SetProperty("Child0Prop1Value", "101");
+
+// Dziecko Child1 (SubChild1)
+inputs.SetProperty("Child1Type", "SubChild1");
+inputs.SetProperty("Child1Parent", "Child1");
+inputs.SetProperty("Child1Prop0Name", "Name");
+inputs.SetProperty("Child1Prop0Value", "First SubChild");
+inputs.SetProperty("Child1Prop1Name", "Level");
+inputs.SetProperty("Child1Prop1Value", "2");
+
+// Drugie dziecko Roota (Child2)
+inputs.SetProperty("Child2Type", "Child2");
+inputs.SetProperty("Child2Parent", "Root");
+inputs.SetProperty("Child2Prop0Name", "Name");
+inputs.SetProperty("Child2Prop0Value", "Second Child");
+inputs.SetProperty("Child2Prop1Name", "ID");
+inputs.SetProperty("Child2Prop1Value", "102");
+
+// Dziecko Child2 (SubChild2)
+inputs.SetProperty("Child3Type", "SubChild2");
+inputs.SetProperty("Child3Parent", "Child2");
+inputs.SetProperty("Child3Prop0Name", "Name");
+inputs.SetProperty("Child3Prop0Value", "Second SubChild");
+inputs.SetProperty("Child3Prop1Name", "Level");
+inputs.SetProperty("Child3Prop1Value", "2");
+
+// Wywołanie Business Service
+boService.InvokeMethod("BuildPropertySet", inputs, outputs);
+
+// Pobranie utworzonego PropertySeta
+var rootPropertySet = outputs.GetChild(0);
+
+Ustawienie pojedynczej właściwości w istniejącym PropertySet
+
+var boService = TheApplication().GetService("PropertySetService");
+var inputs = TheApplication().NewPropertySet();
+var outputs = TheApplication().NewPropertySet();
+
+inputs.SetProperty("Type", "Child1");
+inputs.SetProperty("Key", "Status");
+inputs.SetProperty("Value", "Active");
+
+boService.InvokeMethod("SetPropertyByType", inputs, outputs);
+
+
+var boService = TheApplication().GetService("PropertySetService");
+var inputs = TheApplication().NewPropertySet();
+var outputs = TheApplication().NewPropertySet();
+
+inputs.SetProperty("Type", "Child2");
+inputs.SetProperty("Key", "Name");
+
+boService.InvokeMethod("GetPropertyByType", inputs, outputs);
+
+// Pobranie wartości
+var child2Name = outputs.GetProperty("Value");
+TheApplication().Trace("Nazwa Child2: " + child2Name);
+
+Pobranie wartości właściwości z PropertySet
+
+var boService = TheApplication().GetService("PropertySetService");
+var inputs = TheApplication().NewPropertySet();
+var outputs = TheApplication().NewPropertySet();
+
+inputs.SetProperty("Type", "Child2");
+inputs.SetProperty("Key", "Name");
+
+boService.InvokeMethod("GetPropertyByType", inputs, outputs);
+
+// Pobranie wartości
+var child2Name = outputs.GetProperty("Value");
+TheApplication().Trace("Nazwa Child2: " + child2Name);
+
+Ustawienie wielu właściwości dla PropertySet
+
+var boService = TheApplication().GetService("PropertySetService");
+var inputs = TheApplication().NewPropertySet();
+var outputs = TheApplication().NewPropertySet();
+
+inputs.SetProperty("Type", "Child1");
+inputs.SetProperty("PropNames", "Department,Role");
+inputs.SetProperty("Department", "HR");
+inputs.SetProperty("Role", "Manager");
+
+boService.InvokeMethod("SetMultipleProperties", inputs, outputs);
+
+Pobranie wszystkich właściwości PropertySet
+
+var boService = TheApplication().GetService("PropertySetService");
+var inputs = TheApplication().NewPropertySet();
+var outputs = TheApplication().NewPropertySet();
+
+inputs.SetProperty("Type", "Child1");
+
+boService.InvokeMethod("GetAllProperties", inputs, outputs);
+
+// Pobranie wszystkich wartości
+var allProps = {};
+var propNames = outputs.GetPropertyNames().split(",");
+for (var i = 0; i < propNames.length; i++) {
+    var name = propNames[i].trim();
+    if (name) {
+        allProps[name] = outputs.GetProperty(name);
+    }
+}
+
+TheApplication().Trace("Wszystkie wartości Child1: " + JSON.stringify(allProps));
+
+Pobranie PropertySeta po typie
+var boService = TheApplication().GetService("PropertySetService");
+var inputs = TheApplication().NewPropertySet();
+var outputs = TheApplication().NewPropertySet();
+
+inputs.SetProperty("Type", "SubChild1");
+
+boService.InvokeMethod("GetPropertySetByType", inputs, outputs);
+
+// Pobranie PropertySeta
+var subChild1PropertySet = outputs.GetChild(0);
+
+
+
+
