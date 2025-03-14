@@ -1,0 +1,60 @@
+// Implementacja Business Service
+function Service_PreInvokeMethod(MethodName, Inputs, Outputs) {
+    var builder = new PropertySetBuilder();
+
+    if (MethodName == "BuildPropertySet") {
+        builder.buildFromInputs(Inputs);
+        Outputs.AddChild(builder.get());
+        return CancelOperation;
+    }
+    
+    if (MethodName == "GetPropertySetByType") {
+        var type = Inputs.GetProperty("Type");
+        var propertySet = builder.getPropertySetByType(type);
+        if (propertySet) Outputs.AddChild(propertySet);
+        return CancelOperation;
+    }
+
+    if (MethodName == "SetPropertyByType") {
+        var type = Inputs.GetProperty("Type");
+        var key = Inputs.GetProperty("Key");
+        var value = Inputs.GetProperty("Value");
+        builder.setPropertyByType(type, key, value);
+        return CancelOperation;
+    }
+
+    if (MethodName == "GetPropertyByType") {
+        var type = Inputs.GetProperty("Type");
+        var key = Inputs.GetProperty("Key");
+        var value = builder.getPropertyByType(type, key);
+        if (value !== null) Outputs.SetProperty("Value", value);
+        return CancelOperation;
+    }
+
+    if (MethodName == "SetMultipleProperties") {
+        var type = Inputs.GetProperty("Type");
+        var props = {};
+        var propNames = Inputs.GetProperty("PropNames").split(",");
+        for (var i = 0; i < propNames.length; i++) {
+            var propName = propNames[i].trim();
+            if (propName) {
+                props[propName] = Inputs.GetProperty(propName);
+            }
+        }
+        builder.setMultipleProperties(type, props);
+        return CancelOperation;
+    }
+
+    if (MethodName == "GetAllProperties") {
+        var type = Inputs.GetProperty("Type");
+        var allProps = builder.getAllProperties(type);
+        if (allProps) {
+            for (var key in allProps) {
+                Outputs.SetProperty(key, allProps[key]);
+            }
+        }
+        return CancelOperation;
+    }
+
+    return ContinueOperation;
+}
