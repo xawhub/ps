@@ -1,0 +1,87 @@
+// Business Service do zarządzania hierarchią PropertySet w Siebel eScript
+function PropertySetBuilder() {
+    var app = TheApplication();
+    this.root = app.NewPropertySet();
+    this.root.SetType("Root");
+    this.psPool = []; // Pool dla ponownego użycia PropertySet
+}
+
+// Pobiera PropertySet z puli lub tworzy nowy
+PropertySetBuilder.prototype.getNewPropertySet = function() {
+    return this.psPool.length > 0 ? this.psPool.pop() : TheApplication().NewPropertySet();
+};
+
+// Tworzy nowy PropertySet i przechowuje go jako dziecko `Root`
+PropertySetBuilder.prototype.addChild = function(name) {
+    var child = this.getNewPropertySet();
+    child.SetType(name);
+    this.root.AddChild(child);
+    return child;
+};
+
+// Ustawia wartości właściwości w PropertySet (bez split)
+PropertySetBuilder.prototype.setProperties = function(ps, propertiesString) {
+    var key = "", value = "", isKey = true, len = propertiesString.length;
+
+    for (var i = 0; i < len; i++) {
+        var ch = propertiesString[i];
+
+        if (ch === '=') {
+            isKey = false;
+        } else if (ch === ';' || i === len - 1) {
+            if (i === len - 1 && ch !== ';') value += ch;
+            ps.SetProperty(key, value);
+            key = "";
+            value = "";
+            isKey = true;
+        } else {
+            if (isKey) key += ch;
+            else value += ch;
+        }
+    }
+};
+
+// Tworzy strukturę PropertySet na podstawie Inputs (unikając split)
+PropertySetBuilder.prototype.buildFromInputs = function(inputs) {
+    var propNames = inputs.GetPropertyNames();
+    var len = propNames.length, name = "", parent = "Root", props = "", i = 0;
+
+    while (i < len) {
+        var ch = propNames[i];
+
+        if (ch === ',') {
+            var child = this.addChild(name);
+            this.setProperties(child, props);
+            name = "";
+            props = "";
+        } else {
+            name += ch;
+        }
+        i++;
+    }
+};
+
+// Pobiera wszystkie właściwości jako obiekt (bez split)
+PropertySetBuilder.prototype.getAllProperties = function(ps) {
+    var propNamesStr = ps.GetPropertyNames();
+    var len = propNamesStr.length, i = 0, key = "", properties = {};
+
+    while (i < len) {
+        var ch = propNamesStr[i];
+
+        if (ch === ',' || i === len - 1) {
+            if (i === len - 1) key += ch;
+            properties[key] = ps.GetProperty(key);
+            key = "";
+        } else {
+            key += ch;
+        }
+        i++;
+    }
+    return properties;
+};
+
+// Pobiera główny PropertySet
+PropertySetBuilder.prototype.get = function() {
+    return this.root;
+};
