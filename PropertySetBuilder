@@ -1,0 +1,85 @@
+// Business Service do zarządzania hierarchią PropertySet w Siebel eScript
+function PropertySetBuilder() {
+    this.root = TheApplication().NewPropertySet();
+    this.root.SetType("Root");
+    this.propertySets = { "Root": this.root }; // Mapa do przechowywania referencji do PropertySetów
+}
+
+// Tworzy nowy PropertySet i dodaje go do podanego rodzica
+PropertySetBuilder.prototype.addChildToParent = function(parentType, childType) {
+    var parent = this.propertySets[parentType];
+    if (!parent) {
+        TheApplication().RaiseErrorText("Błąd: Nie znaleziono rodzica '" + parentType + "' dla '" + childType + "'.");
+    }
+
+    var child = TheApplication().NewPropertySet();
+    child.SetType(childType);
+    parent.AddChild(child);
+    this.propertySets[childType] = child; // Przechowujemy referencję
+    return child;
+};
+
+// Ustawia wartość pojedynczej właściwości dla PropertySet po typie
+PropertySetBuilder.prototype.setPropertyByType = function(type, name, value) {
+    var ps = this.propertySets[type];
+    if (ps) {
+        ps.SetProperty(name, value);
+    } else {
+        TheApplication().RaiseErrorText("Błąd: PropertySet '" + type + "' nie istnieje.");
+    }
+};
+
+// Pobiera wartość właściwości po typie PropertySet
+PropertySetBuilder.prototype.getPropertyByType = function(type, name) {
+    var ps = this.propertySets[type];
+    return ps ? ps.GetProperty(name) : null;
+};
+
+// Ustawia wiele właściwości dla PropertySet po typie
+PropertySetBuilder.prototype.setMultipleProperties = function(type, props) {
+    var ps = this.propertySets[type];
+    if (!ps) {
+        TheApplication().RaiseErrorText("Błąd: PropertySet '" + type + "' nie istnieje.");
+    }
+    for (var key in props) {
+        if (props.hasOwnProperty(key)) {
+            ps.SetProperty(key, props[key]);
+        }
+    }
+};
+
+// Pobiera wszystkie właściwości z PropertySet jako obiekt
+PropertySetBuilder.prototype.getAllProperties = function(type) {
+    var ps = this.propertySets[type];
+    if (!ps) {
+        return null;
+    }
+    var properties = {};
+    var propNames = ps.GetPropertyNames().split(",");
+    for (var i = 0; i < propNames.length; i++) {
+        var name = propNames[i].trim();
+        if (name) {
+            properties[name] = ps.GetProperty(name);
+        }
+    }
+    return properties;
+};
+
+// Dodaje całą strukturę PropertySet jako dziecko do innego PropertySet
+PropertySetBuilder.prototype.addPropertySetAsChild = function(parentType, childPS) {
+    var parent = this.propertySets[parentType];
+    if (!parent) {
+        TheApplication().RaiseErrorText("Błąd: Nie znaleziono rodzica '" + parentType + "'.");
+    }
+    parent.AddChild(childPS);
+};
+
+// Pobiera PropertySet po typie
+PropertySetBuilder.prototype.getPropertySetByType = function(type) {
+    return this.propertySets[type] || null;
+};
+
+// Pobiera finalny PropertySet (root)
+PropertySetBuilder.prototype.get = function() {
+    return this.root;
+};
