@@ -1,0 +1,75 @@
+// Business Service do zarządzania hierarchią PropertySet w Siebel eScript
+function PropertySetBuilder() {
+    var app = TheApplication();
+    this.root = app.NewPropertySet();
+    this.root.SetType("Root");
+    this.psPool = []; // Pool dla ponownego użycia PropertySet
+    this.nodes = {};  // PRZYWRÓCONA MAPA dla szybszego wyszukiwania
+}
+
+// Pobiera PropertySet z puli lub tworzy nowy
+PropertySetBuilder.prototype.getNewPropertySet = function() {
+    return this.psPool.length > 0 ? this.psPool.pop() : TheApplication().NewPropertySet();
+};
+
+// Tworzy nowy PropertySet i przechowuje go jako dziecko `Root`
+PropertySetBuilder.prototype.addChild = function(name) {
+    var child = this.getNewPropertySet();
+    child.SetType(name);
+    this.root.AddChild(child);
+    this.nodes[name] = child; // PRZYWRÓCONA REFERENCJA do węzła
+    return child;
+};
+
+// Ustawia wartości właściwości w PropertySet
+PropertySetBuilder.prototype.setProperties = function(ps, propertiesString) {
+    var key = "", value = "", isKey = true, len = propertiesString.length;
+
+    for (var i = 0; i < len; i++) {
+        var ch = propertiesString[i];
+
+        if (ch === '=') {
+            isKey = false;
+        } else if (ch === ';' || i === len - 1) {
+            if (i === len - 1 && ch !== ';') value += ch;
+            ps.SetProperty(key, value); // Naprawiony błąd
+            key = "";
+            value = "";
+            isKey = true;
+        } else {
+            if (isKey) key += ch;
+            else value += ch;
+        }
+    }
+};
+
+// Pobiera wartość właściwości dla danego PropertySet
+PropertySetBuilder.prototype.getProperty = function(name, key) {
+    var ps = this.nodes[name]; // Użycie PRZYWRÓCONEJ MAPY zamiast wyszukiwania w drzewie
+    return ps ? ps.GetProperty(key) : null;
+};
+
+// Pobiera wszystkie właściwości jako obiekt
+PropertySetBuilder.prototype.getAllProperties = function(ps) {
+    var propNamesStr = ps.GetPropertyNames();
+    var len = propNamesStr.length, i = 0, key = "", properties = {};
+
+    while (i < len) {
+        var ch = propNamesStr[i];
+
+        if (ch === ',' || i === len - 1) {
+            if (i === len - 1) key += ch;
+            properties[key] = ps.GetProperty(key);
+            key = "";
+        } else {
+            key += ch;
+        }
+        i++;
+    }
+    return properties;
+};
+
+// Pobiera główny PropertySet
+PropertySetBuilder.prototype.get = function() {
+    return this.root;
+};
