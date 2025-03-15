@@ -1,0 +1,55 @@
+function PerformanceTest() {
+    var testSizes = [10, 100, 1000, 10000, 100000];
+
+    for (var i = 0; i < testSizes.length; i++) {
+        var size = testSizes[i];
+        TheApplication().Trace("Test dla " + size + " rekordów:");
+
+        // Test: PropertySetBuilder
+        var start1 = new Date().getTime();
+        var builder = new PropertySetBuilder();
+        for (var j = 0; j < size; j++) {
+            var name = "Node" + j;
+            var child = builder.addChild(name); // PRZYJMUJE PropertySet zamiast nazwy
+            builder.setProperties(child, "Key1=Value" + j + ";Key2=Extra" + j);
+        }
+        var psBuilder = builder.get();
+        var end1 = new Date().getTime();
+        TheApplication().Trace("PropertySetBuilder: " + (end1 - start1) + " ms");
+
+        // Test: Standardowe PropertySety
+        var start2 = new Date().getTime();
+        var rootPs = TheApplication().NewPropertySet();
+        rootPs.SetType("Root");
+        for (var k = 0; k < size; k++) {
+            var child = TheApplication().NewPropertySet();
+            child.SetType("Node" + k);
+            child.SetProperty("Key1", "Value" + k);
+            child.SetProperty("Key2", "Extra" + k);
+            rootPs.AddChild(child);
+        }
+        var end2 = new Date().getTime();
+        TheApplication().Trace("Standard PropertySet: " + (end2 - start2) + " ms");
+
+        // Pobieranie danych: PropertySetBuilder
+        var start3 = new Date().getTime();
+        var value1 = builder.getProperty("Node" + (size - 1), "Key1"); // Teraz działa poprawnie
+        var end3 = new Date().getTime();
+        TheApplication().Trace("Pobranie PropertySetBuilder: " + (end3 - start3) + " ms");
+
+        // Pobieranie danych: Standard PropertySet
+        var start4 = new Date().getTime();
+        var nodeFound = null;
+        for (var c = 0; c < rootPs.GetChildCount(); c++) {
+            var childNode = rootPs.GetChild(c);
+            if (childNode.GetType() === "Node" + (size - 1)) {
+                nodeFound = childNode.GetProperty("Key1");
+                break;
+            }
+        }
+        var end4 = new Date().getTime();
+        TheApplication().Trace("Pobranie Standard PropertySet: " + (end4 - start4) + " ms");
+
+        TheApplication().Trace("---------------------------------------");
+    }
+}
