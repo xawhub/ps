@@ -1,0 +1,40 @@
+function Service_PreInvokeMethod(methodName, inputs, outputs) {
+    try {
+        var builder = new PropertySetBuilder(); // Tworzymy buildera tylko raz
+
+        switch (methodName) {
+            case "BuildPropertySet":
+                builder.buildFromInputs(inputs);
+                outputs.AddChild(builder.get());
+                return CancelOperation;
+
+            case "GetPropertySet":
+                var name = inputs.GetProperty("Name");
+                var ps = builder.getPropertySet(name);
+                if (!ps) {
+                    TheApplication().RaiseErrorText("Błąd: PropertySet '" + name + "' nie istnieje.");
+                }
+                outputs.AddChild(ps);
+                return CancelOperation;
+
+            case "GetPropertyValue":
+                var name = inputs.GetProperty("Name");
+                var key = inputs.GetProperty("Key");
+                var ps = builder.getPropertySet(name);
+
+                if (!ps) {
+                    TheApplication().RaiseErrorText("Błąd: PropertySet '" + name + "' nie istnieje.");
+                } else if (typeof ps.GetProperty !== "function") {
+                    TheApplication().RaiseErrorText("Błąd: Obiekt PropertySet nie ma metody GetProperty.");
+                }
+
+                outputs.SetProperty("Value", ps.GetProperty(key));
+                return CancelOperation;
+
+            default:
+                return ContinueOperation;
+        }
+    } catch (e) {
+        TheApplication().RaiseErrorText("Błąd w PreInvokeMethod: " + e.toString());
+    }
+}
