@@ -1,66 +1,80 @@
-// Business Service do zarządzania hierarchią PropertySet w Siebel eScript
 function PropertySetBuilder() {
     var app = TheApplication();
     this.root = app.NewPropertySet();
     this.root.SetType("Root");
-    this.propertySets = { "Root": this.root };
-    this.psPool = []; // Pula PropertySetów dla optymalizacji pamięci
+    this.propertySets = { "Root": this.root }; // Mapa do przechowywania PropertySetów
 }
 
-// Pobiera PropertySet z puli lub tworzy nowy
-PropertySetBuilder.prototype.getNewPropertySet = function() {
-    return this.psPool.length > 0 ? this.psPool.pop() : TheApplication().NewPropertySet();
-};
-
-// Tworzy nowy PropertySet i dodaje do rodzica
+// Tworzy nowy PropertySet i dodaje go jako dziecko `Root`
 PropertySetBuilder.prototype.addChild = function(name, parentName) {
     var parent = this.propertySets[parentName];
+    
     if (!parent) {
-        TheApplication().RaiseErrorText("Błąd: Nie znaleziono rodzica '" + parentName + "' dla '" + name + "'.");
+        TheApplication().Trace("Błąd: Nie znaleziono rodzica '" + parentName + "' dla '" + name + "'.");
+        TheApplication().RaiseErrorText("Błąd: Brak nadrzędnego PropertySetu.");
     }
 
-    var child = this.getNewPropertySet();
+    var child = TheApplication().NewPropertySet();
     child.SetType(name);
     parent.AddChild(child);
-    this.propertySets[name] = child;
+    
+    this.propertySets[name] = child; // 🔹 Upewniamy się, że dodajemy do mapy
     return child;
 };
 
-// Ustawia wartości właściwości w PropertySet (optymalizacja indexOf zamiast split)
+// Ustawia właściwości w PropertySet (bez `split()`)
 PropertySetBuilder.prototype.setProperties = function(name, propertiesString) {
     var ps = this.propertySets[name];
+
     if (!ps) {
-        TheApplication().RaiseErrorText("Błąd: PropertySet '" + name + "' nie istnieje.");
+        TheApplication().Trace("Błąd: PropertySet '" + name + "' nie istnieje.");
+        TheApplication().RaiseErrorText("Błąd: PropertySet nie znaleziony.");
     }
 
-    var key = "", value = "";
-    var i = 0, len = propertiesString.length, eqIndex, semiIndex;
-    
-    while (i < len) {
-        eqIndex = propertiesString.indexOf("=", i);
-        if (eqIndex === -1) break;
-        
-        semiIndex = propertiesString.indexOf(";", eqIndex);
-        if (semiIndex === -1) semiIndex = len;
-        
-        key = propertiesString.substring(i, eqIndex);
-        value = propertiesString.substring(eqIndex + 1, semiIndex);
-        
-        ps.SetProperty(key, value);
-        i = semiIndex + 1;
+    var key = "", value = "", isKey = true, len = propertiesString.length;
+
+    for (var i = 0; i < len; i++) {
+        var ch = propertiesString[i];
+
+        if (ch === '=') {
+            isKey = false;
+        } else if (ch === ';' || i === len - 1) {
+            if (i === len - 1 && ch !== ';') value += ch;
+            ps.SetProperty(key, value);
+            key = "";
+            value = "";
+            isKey = true;
+        } else {
+            if (isKey) key += ch;
+            else value += ch;
+        }
     }
+};
+
+// Pobiera PropertySet po nazwie
+PropertySetBuilder.prototype.getPropertySet = function(name) {
+    return this.propertySets[name];
 };
 
 // Tworzy strukturę PropertySet na podstawie Inputs
 PropertySetBuilder.prototype.buildFromInputs = function(inputs) {
     var propNames = inputs.GetPropertyNames();
-    var i = 0, len = propNames.length, name = "", parent = "Root", props = "";
+    var len = propNames.length, name = "", props = "", i = 0, parent = "Root";
 
     while (i < len) {
         var ch = propNames[i];
 
         if (ch === ',') {
-            var child = this.addChild(name, parent);
+            var parentStart = props.indexOf("Parent=");
+            if (parentStart !== -1) {
+                var parentEnd = props.indexOf(";", parentStart);
+                if (parentEnd === -1) parentEnd = props.length;
+                parent = props.substring(parentStart + 7, parentEnd);
+            } else {
+                parent = "Root";
+            }
+
+            this.addChild(name, parent);
             this.setProperties(name, props);
             name = "";
             props = "";
@@ -71,12 +85,7 @@ PropertySetBuilder.prototype.buildFromInputs = function(inputs) {
     }
 };
 
-// Pobiera PropertySet po nazwie
-PropertySetBuilder.prototype.getPropertySet = function(name) {
-    return this.propertySets[name] || null;
-};
-
-// Pobiera główny PropertySet
+// Pobiera główny PropertySet (Root)
 PropertySetBuilder.prototype.get = function() {
     return this.root;
 };
