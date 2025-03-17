@@ -2,7 +2,8 @@ function PropertySetBuilder() {
     var app = TheApplication();
     this.root = app.NewPropertySet();
     this.root.SetType("Root");
-    this.propertySets = { Root: this.root }; // Mapa dla szybkiego dostępu
+    this.propertySets = {};
+    this.propertySets["Root"] = this.root;
 }
 
 // 📌 **Tworzenie nowego PropertySet**
@@ -23,45 +24,32 @@ PropertySetBuilder.prototype.create = function(name, parentName) {
 
 // 📌 **Ustawianie struktury PropertySet per rodzic**
 PropertySetBuilder.prototype.setStructure = function(name, structure) {
-    var ps = this.propertySets[name];
-    if (!ps) {
+    var ps;
+    if (this.propertySets[name]) {
+        ps = this.propertySets[name];
+    } else {
         TheApplication().RaiseErrorText("Błąd: PropertySet '" + name + "' nie istnieje.");
+        return;
     }
 
-    var key = "", value = "", isKey = true, len = structure.length;
-    for (var i = 0; i < len; i++) {
-        var ch = structure[i];
-
-        if (ch === '=') {
-            isKey = false;
-        } else if (ch === ';' || i === len - 1) {
-            if (i === len - 1) value += ch;
-            ps.SetProperty(key, value);
-            key = "";
-            value = "";
-            isKey = true;
-        } else {
-            if (isKey) key += ch;
-            else value += ch;
+    var pairs = structure.split(";");
+    var i;
+    for (i = 0; i < pairs.length; i++) {
+        var keyValue = pairs[i].split("=");
+        if (keyValue.length === 2) {
+            ps.SetProperty(keyValue[0], keyValue[1]);
         }
     }
 };
 
 // 📌 **Ustawianie struktury całej hierarchii**
 PropertySetBuilder.prototype.setHierarchy = function(inputs) {
-    var propNames = inputs.GetPropertyNames(), len = propNames.length, i = 0, name = "", props = "", parent = "Root";
-
-    while (i < len) {
-        var ch = propNames[i];
-        if (ch === ',') {
-            this.create(name, parent);
-            this.setStructure(name, inputs.GetProperty(name));
-            name = "";
-            props = "";
-        } else {
-            name += ch;
-        }
-        i++;
+    var propNames = this._getPropertyNames(inputs);
+    var i;
+    for (i = 0; i < propNames.length; i++) {
+        var name = propNames[i];
+        this.create(name, "Root");
+        this.setStructure(name, inputs.GetProperty(name));
     }
 };
 
@@ -73,9 +61,12 @@ PropertySetBuilder.prototype.mergeSets = function(targetParent, setsArray) {
     } else {
         parent = this.root;
     }
-    for (var i = 0; i < setsArray.length; i++) {
-        var child = this.propertySets[setsArray[i]];
-        if (child) {
+
+    var i;
+    for (i = 0; i < setsArray.length; i++) {
+        var child;
+        if (this.propertySets[setsArray[i]]) {
+            child = this.propertySets[setsArray[i]];
             parent.AddChild(child);
         }
     }
@@ -85,27 +76,25 @@ PropertySetBuilder.prototype.mergeSets = function(targetParent, setsArray) {
 PropertySetBuilder.prototype.getPropertySet = function(name) {
     if (this.propertySets[name]) {
         return this.propertySets[name];
+    } else {
+        return null;
     }
-    else return null;
 };
 
 // 📌 **Pobieranie właściwości z PropertySet**
 PropertySetBuilder.prototype.getProperties = function(name) {
-    var ps = this.propertySets[name];
-    if (!ps) return null;
+    var ps;
+    if (this.propertySets[name]) {
+        ps = this.propertySets[name];
+    } else {
+        return null;
+    }
 
-    var propNames = ps.GetPropertyNames(), len = propNames.length, i = 0, key = "", properties = {};
-
-    while (i < len) {
-        var ch = propNames[i];
-        if (ch === ',' || i === len - 1) {
-            if (i === len - 1) key += ch;
-            properties[key] = ps.GetProperty(key);
-            key = "";
-        } else {
-            key += ch;
-        }
-        i++;
+    var propNames = this._getPropertyNames(ps);
+    var properties = {};
+    var i;
+    for (i = 0; i < propNames.length; i++) {
+        properties[propNames[i]] = ps.GetProperty(propNames[i]);
     }
     return properties;
 };
@@ -113,4 +102,16 @@ PropertySetBuilder.prototype.getProperties = function(name) {
 // 📌 **Pobieranie głównego PropertySet**
 PropertySetBuilder.prototype.get = function() {
     return this.root;
+};
+
+// 📌 **Funkcja pomocnicza do pobierania nazw właściwości**
+PropertySetBuilder.prototype._getPropertyNames = function(ps) {
+    var propNames = [];
+    var propEnum = ps.GetFirstProperty();
+
+    while (propEnum !== "") {
+        propNames.push(propEnum);
+        propEnum = ps.GetNextProperty();
+    }
+    return propNames;
 };
