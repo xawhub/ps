@@ -1,0 +1,43 @@
+function Service_PreInvokeMethod(methodName, inputs, outputs) {
+    var builder = new PropertySetBuilder();
+
+    if (methodName === "CreatePropertySet") {
+        builder.create(inputs.GetProperty("Name"), inputs.GetProperty("Parent"));
+        outputs.AddChild(builder.get());
+        return CancelOperation;
+    }
+
+    if (methodName === "SetStructure") {
+        builder.setStructure(inputs.GetProperty("Name"), inputs.GetProperty("Properties"));
+        outputs.AddChild(builder.get());
+        return CancelOperation;
+    }
+
+    if (methodName === "SetHierarchy") {
+        builder.setHierarchy(inputs);
+        outputs.AddChild(builder.get());
+        return CancelOperation;
+    }
+
+    if (methodName === "MergeSets") {
+        var setsArray = inputs.GetProperty("Sets").split(",");
+        builder.mergeSets(inputs.GetProperty("TargetParent"), setsArray);
+        outputs.AddChild(builder.get());
+        return CancelOperation;
+    }
+
+    if (methodName === "GetPropertySet") {
+        outputs.AddChild(builder.getPropertySet(inputs.GetProperty("Name")));
+        return CancelOperation;
+    }
+
+    if (methodName === "GetProperties") {
+        var props = builder.getProperties(inputs.GetProperty("Name"));
+        for (var key in props) {
+            outputs.SetProperty(key, props[key]);
+        }
+        return CancelOperation;
+    }
+
+    return ContinueOperation;
+}
