@@ -1,0 +1,152 @@
+function PropertySetBuilder() {
+    var app = TheApplication();
+    this.root = app.NewPropertySet();
+    this.root.SetType("Root");
+    this.propertySets = { Root: this.root };
+}
+
+// 📌 **Tworzenie nowego PropertySet**
+PropertySetBuilder.prototype.create = function(name, parentName) {
+    var parent = this.propertySets[parentName] || this.root;
+
+    var child = TheApplication().NewPropertySet();
+    child.SetType(name);
+    parent.AddChild(child);
+    this.propertySets[name] = child;
+    return child;
+};
+
+// 📌 **Ustawianie struktury PropertySet**
+PropertySetBuilder.prototype.setStructure = function(name, structure) {
+    var ps = this.propertySets[name];
+    if (!ps) {
+        TheApplication().RaiseErrorText("Błąd: PropertySet '" + name + "' nie istnieje.");
+        return;
+    }
+    if (!structure) return; // Obsługa pustych wartości
+
+    var key = "", value = "", isKey = true, i, ch;
+    for (i = 0; i < structure.length; i++) {
+        ch = structure.charAt(i);
+
+        if (ch === "=") {
+            isKey = false;
+        } else if (ch === ";" || i === structure.length - 1) {
+            if (i === structure.length - 1) value += ch; // Dodaj ostatni znak wartości
+            ps.SetProperty(key.trim(), value.trim());
+            key = "";
+            value = "";
+            isKey = true;
+        } else {
+            if (isKey) key += ch;
+            else value += ch;
+        }
+    }
+};
+
+// 📌 **Ustawianie struktury całej hierarchii**
+PropertySetBuilder.prototype.setHierarchy = function(inputs) {
+    var propNames = [];
+    var propEnum = inputs.GetFirstProperty();
+
+    while (propEnum !== "") {
+        propNames.push(propEnum);
+        propEnum = inputs.GetNextProperty();
+    }
+
+    var i, name;
+    for (i = 0; i < propNames.length; i++) {
+        name = propNames[i];
+        this.create(name, "Root");
+        this.setStructure(name, inputs.GetProperty(name));
+    }
+};
+
+// 📌 **Łączenie kilku PropertySet w jeden**
+PropertySetBuilder.prototype.mergeSets = function(targetParent, setsArray) {
+    var parent = this.propertySets[targetParent] || this.root;
+    var i, child;
+
+    for (i = 0; i < setsArray.length; i++) {
+        child = this.propertySets[setsArray[i]];
+        if (child) {
+            parent.AddChild(child);
+        }
+    }
+};
+
+// 📌 **Pobieranie PropertySet**
+PropertySetBuilder.prototype.getPropertySet = function(name) {
+    return this.propertySets[name] || null;
+};
+
+// 📌 **Pobieranie właściwości z PropertySet**
+PropertySetBuilder.prototype.getProperties = function(name) {
+    var ps = this.propertySets[name];
+    if (!ps) return null;
+
+    var properties = {};
+    var propEnum = ps.GetFirstProperty();
+    
+    while (propEnum !== "") {
+        properties[propEnum] = ps.GetProperty(propEnum);
+        propEnum = ps.GetNextProperty();
+    }
+    return properties;
+};
+
+// 📌 **Pobieranie głównego PropertySet**
+PropertySetBuilder.prototype.get = function() {
+    return this.root;
+};
+
+// 📌 **Główna metoda obsługująca serwis**
+function Service_PreInvokeMethod(methodName, inputs, outputs) {
+    var builder = new PropertySetBuilder();
+
+    if (methodName === "CreatePropertySet") {
+        builder.create(inputs.GetProperty("Name"), inputs.GetProperty("Parent") || "Root");
+        outputs.AddChild(builder.get());
+        return CancelOperation;
+    }
+
+    if (methodName === "SetStructure") {
+        builder.setStructure(inputs.GetProperty("Name"), inputs.GetProperty("Properties") || "");
+        outputs.AddChild(builder.get());
+        return CancelOperation;
+    }
+
+    if (methodName === "SetHierarchy") {
+        builder.setHierarchy(inputs);
+        outputs.AddChild(builder.get());
+        return CancelOperation;
+    }
+
+    if (methodName === "MergeSets") {
+        var setsValue = inputs.GetProperty("Sets");
+        var setsArray = setsValue ? setsValue.split(",") : [];
+        builder.mergeSets(inputs.GetProperty("TargetParent") || "Root", setsArray);
+        outputs.AddChild(builder.get());
+        return CancelOperation;
+    }
+
+    if (methodName === "GetPropertySet") {
+        var ps = builder.getPropertySet(inputs.GetProperty("Name"));
+        if (ps) {
+            outputs.AddChild(ps);
+        }
+        return CancelOperation;
+    }
+
+    if (methodName === "GetProperties") {
+        var props = builder.getProperties(inputs.GetProperty("Name"));
+        if (props) {
+            for (var key in props) {
+                outputs.SetProperty(key, props[key]);
+            }
+        }
+        return CancelOperation;
+    }
+
+    return ContinueOperation;
+}
