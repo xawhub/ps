@@ -1,0 +1,302 @@
+function EnhancedPropertySetBuilder() {
+    var app = TheApplication();
+    this.root = app.NewPropertySet();
+    this.root.SetType("Root");
+    this.propertySets = {"Root": this.root}; // Zachowujemy dla szybkiego dostępu
+}
+
+EnhancedPropertySetBuilder.prototype = {
+    constructor: EnhancedPropertySetBuilder,
+
+    // Bardziej elastyczna metoda tworzenia, zwraca self dla chainingu
+    createChild: function(name, parentName) {
+        var parent = this.propertySets[parentName] || this.root;
+        var child = TheApplication().NewPropertySet();
+        child.SetType(name);
+        parent.AddChild(child);
+        this.propertySets[name] = child;
+        return this; // Umożliwia chaining
+    },
+
+    // Ustawia pojedynczą właściwość dla istniejącego PropertySet
+    setProperty: function(setName, key, value) {
+        var ps = this.propertySets[setName];
+        if (ps) {
+            ps.SetProperty(key, value);
+        } else {
+            TheApplication().RaiseErrorText("Blad: PropertySet '" + setName + "' nie istnieje.");
+        }
+        return this;
+    },
+
+    // Ustawia wiele właściwości z obiektu
+    setProperties: function(setName, properties) {
+        var ps = this.propertySets[setName];
+        if (ps && typeof properties === 'object') {
+            for (var key in properties) {
+                if (properties.hasOwnProperty(key)) {
+                    ps.SetProperty(key, properties[key]);
+                }
+            }
+        } else if (!ps) {
+            TheApplication().RaiseErrorText("Blad: PropertySet '" + setName + "' nie istnieje.");
+        } else {
+            TheApplication().RaiseErrorText("Blad: 'properties' musi byc obiektem.");
+        }
+        return this;
+    },
+
+    // Ustawia atrybut PropertySet
+    setAttribute: function(setName, attribute, value) {
+        var ps = this.propertySets[setName];
+        if (ps) {
+            ps.SetAttribute(attribute, value);
+        } else {
+            TheApplication().RaiseErrorText("Blad: PropertySet '" + setName + "' nie istnieje.");
+        }
+        return this;
+    },
+
+    // Ustawia strukturę z bardziej elastycznego formatu (obiekt z właściwościami)
+    setNodeStructure: function(name, structure) {
+        var ps = this.propertySets[name];
+        if (!ps) {
+            TheApplication().RaiseErrorText("Blad: PropertySet '" + name + "' nie istnieje.");
+            return this;
+        }
+        if (typeof structure === 'object' && structure !== null) {
+            if (structure.properties) {
+                this.setProperties(name, structure.properties);
+            }
+            if (structure.attributes) {
+                for (var attr in structure.attributes) {
+                    if (structure.attributes.hasOwnProperty(attr)) {
+                        this.setAttribute(name, attr, structure.attributes[attr]);
+                    }
+                }
+            }
+            // Można dodać obsługę child nodes tutaj, ale dla prostoty zostawiam createChild
+        } else if (typeof structure === 'string') {
+            // Zachowanie starej logiki parsowania stringa (może być usunięte lub oznaczone jako deprecated)
+            var key = "", value = "", isKey = true, i, ch;
+            for (i = 0; i < structure.length; i++) {
+                ch = structure.charAt(i);
+                if (ch === "=") {
+                    isKey = false;
+                } else if (ch === ";" || i === structure.length - 1) {
+                    if (i === structure.length - 1) value += ch;
+                    this.setProperty(name, key.trim(), value.trim());
+                    key = "";
+                    value = "";
+                    isKey = true;
+                } else {
+                    if (isKey) key += ch;
+                    else value += ch;
+                }
+            }
+        }
+        return this;
+    },
+
+    // Metoda do tworzenia wielu prostych węzłów (optymalizacja dla prostych list)
+    createSimpleChildren: function(parentName, count, baseName, propertyKey, valuePrefix) {
+        var parent = this.propertySets[parentName] || this.root;
+        for (var i = 0; i < count; i++) {
+            var childName = baseName + i;
+            var child = TheApplication().NewPropertySet();
+            child.SetType(childName);
+            if (propertyKey && valuePrefix !== undefined) {
+                child.SetProperty(propertyKey, valuePrefix + i);
+            }
+            parent.AddChild(child);
+            this.propertySets[childName] = child;
+        }
+        return this;
+    },
+
+    // Pobieranie PropertySet
+    getPropertySet: function(name) {
+        return this.propertySets[name] || null;
+    },
+
+    // Pobieranie właściwości z PropertySet (opcjonalnie tylko wybrane)
+    getProperties: function(name, keys) {
+        var ps = this.propertySets[name];
+        if (!ps) return null;
+
+        var properties = {};
+        if (keys && Array.isArray(keys)) {
+            for (var i = 0; i < keys.length; i++) {
+                var key = keys[i];
+                properties[key] = ps.GetProperty(key);
+            }
+        } else {
+            var propEnum = ps.GetFirstProperty();
+            while (propEnum !== "") {
+                properties[propEnum] = ps.GetProperty(propEnum);
+                propEnum = ps.GetNextProperty();
+            }
+        }
+        return properties;
+    },
+
+    // Pobieranie głównego PropertySet
+    get: function() {
+        return this.root;
+    }
+};
+
+// Nowa wersja serwisu wykorzystująca EnhancedPropertySetBuilder
+function EnhancedService_PreInvokeMethod(methodName, inputs, outputs) {
+    var builder = new EnhancedPropertySetBuilder();
+
+    if (methodName === "CreateChild") {
+        builder.createChild(inputs.GetProperty("Name"), inputs.GetProperty("Parent") || "Root");
+        outputs.AddChild(builder.get());
+        return CancelOperation;
+    }
+
+    if (methodName === "SetProperty") {
+        builder.setProperty(inputs.GetProperty("Name"), inputs.GetProperty("Key"), inputs.GetProperty("Value"));
+        outputs.AddChild(builder.get());
+        return CancelOperation;
+    }
+
+    if (methodName === "SetPropertiesFromObject") {
+        var name = inputs.GetProperty("Name");
+        var propsString = inputs.GetProperty("Properties");
+        try {
+            var propsObject = JSON.parse(propsString);
+            builder.setProperties(name, propsObject);
+            outputs.AddChild(builder.get());
+        } catch (e) {
+            TheApplication().RaiseErrorText("Blad parsowania JSON: " + e.message);
+        }
+        return CancelOperation;
+    }
+
+    if (methodName === "SetNodeStructure") {
+        var name = inputs.GetProperty("Name");
+        var structureString = inputs.GetProperty("Structure");
+        // Można spróbować parsować jako JSON, a w razie niepowodzenia użyć starej logiki
+        try {
+            var structureObject = JSON.parse(structureString);
+            builder.setNodeStructure(name, structureObject);
+        } catch (e) {
+            builder.setNodeStructure(name, structureString); // Użyj starej logiki
+        }
+        outputs.AddChild(builder.get());
+        return CancelOperation;
+    }
+
+    if (methodName === "CreateSimpleChildren") {
+        var parent = inputs.GetProperty("Parent") || "Root";
+        var count = parseInt(inputs.GetProperty("Count"), 10) || 0;
+        var baseName = inputs.GetProperty("BaseName") || "Child";
+        var key = inputs.GetProperty("PropertyKey");
+        var prefix = inputs.GetProperty("ValuePrefix") || "";
+        builder.createSimpleChildren(parent, count, baseName, key, prefix);
+        outputs.AddChild(builder.get());
+        return CancelOperation;
+    }
+
+    if (methodName === "GetPropertySet") {
+        var ps = builder.getPropertySet(inputs.GetProperty("Name"));
+        if (ps) {
+            outputs.AddChild(ps);
+        }
+        return CancelOperation;
+    }
+
+    if (methodName === "GetProperties") {
+        var name = inputs.GetProperty("Name");
+        var keysString = inputs.GetProperty("Keys");
+        var keysArray = keysString ? keysString.split(",") : null;
+        var props = builder.getProperties(name, keysArray);
+        if (props) {
+            for (var key in props) {
+                outputs.SetProperty(key, props[key]);
+            }
+        }
+        return CancelOperation;
+    }
+
+    return ContinueOperation;
+}
+
+function EnhancedPerformanceTest() {
+    var testSizes = [10, 100, 1000, 10000, 100000];
+
+    for (var i = 0; i < testSizes.length; i++) {
+        var size = testSizes[i];
+        TheApplication().Trace("🔹 Enhanced Test dla " + size + " rekordow:");
+
+        // Test: EnhancedPropertySetBuilder
+        var builder = new EnhancedPropertySetBuilder();
+
+        // Tworzenie wielu prostych węzłów
+        var start1 = new Date().getTime();
+        builder.createSimpleChildren("Root", size, "FastNode", "Id", "Value");
+        var end1 = new Date().getTime();
+        TheApplication().Trace("  ✅ Szybkie tworzenie EnhancedBuilder: " + (end1 - start1) + " ms");
+
+        // Ustawianie dodatkowych właściwości (przykład)
+        var start2 = new Date().getTime();
+        for (var j = 0; j < size; j++) {
+            builder.setProperty("FastNode" + j, "Extra", "Info" + j);
+        }
+        var end2 = new Date().getTime();
+        TheApplication().Trace("  ✅ Ustawianie pojedynczych właściwości EnhancedBuilder: " + (end2 - start2) + " ms");
+
+        // Pobieranie PropertySet EnhancedBuilder
+        var start3 = new Date().getTime();
+        var lastNode = builder.getPropertySet("FastNode" + (size - 1));
+        var end3 = new Date().getTime();
+        TheApplication().Trace("  ✅ Pobieranie PropertySet EnhancedBuilder: " + (end3 - start3) + " ms");
+
+        // Pobieranie wybranych właściwości EnhancedBuilder
+        var start4 = new Date().getTime();
+        var props = builder.getProperties("FastNode" + (size - 1), ["Id", "Extra"]);
+        var end4 = new Date().getTime();
+        TheApplication().Trace("  ✅ Pobieranie wybranych właściwości EnhancedBuilder: " + (end4 - start4) + " ms");
+
+        TheApplication().Trace("---------------------------------------");
+
+        // Test: Standardowy PropertySet (dla porównania)
+        var rootPs = TheApplication().NewPropertySet();
+        rootPs.SetType("Root");
+
+        var start5 = new Date().getTime();
+        for (var k = 0; k < size; k++) {
+            var child = TheApplication().NewPropertySet();
+            child.SetType("StandardNode" + k);
+            child.SetProperty("Id", "Value" + k);
+            child.SetProperty("Extra", "Info" + k);
+            rootPs.AddChild(child);
+        }
+        var end5 = new Date().getTime();
+        TheApplication().Trace("  ✅ Tworzenie i ustawianie Standardowy PS: " + (end5 - start5) + " ms");
+
+        var start6 = new Date().getTime();
+        var foundNode = null;
+        for (var c = 0; c < rootPs.GetChildCount(); c++) {
+            if (rootPs.GetChild(c).GetType() === "StandardNode" + (size - 1)) {
+                foundNode = rootPs.GetChild(c);
+                break;
+            }
+        }
+        var end6 = new Date().getTime();
+        TheApplication().Trace("  ✅ Pobieranie Standardowy PS: " + (end6 - start6) + " ms");
+
+        var start7 = new Date().getTime();
+        var standardProps = {};
+        if (foundNode) {
+            standardProps["Id"] = foundNode.GetProperty("Id");
+            standardProps["Extra"] = foundNode.GetProperty("Extra");
+        }
+        var end7 = new Date().getTime();
+        TheApplication().Trace("  ✅ Pobieranie właściwości Standardowy PS: " + (end7 - start7) + " ms");
+
+        TheApplication().Trace("---------------------------------------");
+    }
+}
