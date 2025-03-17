@@ -1,0 +1,90 @@
+function PerformanceTest() {
+    var testSizes = [10, 100, 1000, 10000, 100000];
+
+    for (var i = 0; i < testSizes.length; i++) {
+        var size = testSizes[i];
+        TheApplication().Trace("🔹 Test dla " + size + " rekordów:");
+
+        // 📌 **Test: PropertySetBuilder**
+        var builder = new PropertySetBuilder();
+        
+        // ✅ Tworzenie PropertySet
+        var start1 = new Date().getTime();
+        for (var j = 0; j < size; j++) {
+            builder.create("Node" + j, "Root");
+        }
+        var end1 = new Date().getTime();
+        TheApplication().Trace("  ✅ Tworzenie PropertySetBuilder: " + (end1 - start1) + " ms");
+
+        // ✅ Ustawianie struktury PropertySetBuilder
+        var start2 = new Date().getTime();
+        for (var j = 0; j < size; j++) {
+            builder.setStructure("Node" + j, "Key1=Value" + j + ";Key2=Extra" + j);
+        }
+        var end2 = new Date().getTime();
+        TheApplication().Trace("  ✅ Ustawianie struktury PropertySetBuilder: " + (end2 - start2) + " ms");
+
+        // ✅ Pobieranie PropertySet PropertySetBuilder
+        var start3 = new Date().getTime();
+        var lastNode = builder.getPropertySet("Node" + (size - 1));
+        var end3 = new Date().getTime();
+        TheApplication().Trace("  ✅ Pobieranie PropertySetBuilder: " + (end3 - start3) + " ms");
+
+        // ✅ Pobieranie właściwości PropertySetBuilder
+        var start4 = new Date().getTime();
+        var props = builder.getProperties("Node" + (size - 1));
+        var end4 = new Date().getTime();
+        TheApplication().Trace("  ✅ Pobieranie właściwości PropertySetBuilder: " + (end4 - start4) + " ms");
+
+        TheApplication().Trace("---------------------------------------");
+
+        // 📌 **Test: Standardowy PropertySet**
+        var rootPs = TheApplication().NewPropertySet();
+        rootPs.SetType("Root");
+
+        // ✅ Tworzenie standardowego PropertySet
+        var start5 = new Date().getTime();
+        for (var k = 0; k < size; k++) {
+            var child = TheApplication().NewPropertySet();
+            child.SetType("Node" + k);
+            rootPs.AddChild(child);
+        }
+        var end5 = new Date().getTime();
+        TheApplication().Trace("  ✅ Tworzenie standardowego PropertySet: " + (end5 - start5) + " ms");
+
+        // ✅ Ustawianie właściwości w standardowym PropertySet
+        var start6 = new Date().getTime();
+        for (var k = 0; k < size; k++) {
+            var child = rootPs.GetChild(k);
+            child.SetProperty("Key1", "Value" + k);
+            child.SetProperty("Key2", "Extra" + k);
+        }
+        var end6 = new Date().getTime();
+        TheApplication().Trace("  ✅ Ustawianie struktury standardowego PropertySet: " + (end6 - start6) + " ms");
+
+        // ✅ Pobieranie PropertySet w standardowy sposób
+        var start7 = new Date().getTime();
+        var nodeFound = null;
+        for (var c = 0; c < rootPs.GetChildCount(); c++) {
+            var childNode = rootPs.GetChild(c);
+            if (childNode.GetType() === "Node" + (size - 1)) {
+                nodeFound = childNode;
+                break;
+            }
+        }
+        var end7 = new Date().getTime();
+        TheApplication().Trace("  ✅ Pobieranie standardowego PropertySet: " + (end7 - start7) + " ms");
+
+        // ✅ Pobieranie właściwości w standardowy sposób
+        var start8 = new Date().getTime();
+        var foundProps = {};
+        if (nodeFound) {
+            foundProps["Key1"] = nodeFound.GetProperty("Key1");
+            foundProps["Key2"] = nodeFound.GetProperty("Key2");
+        }
+        var end8 = new Date().getTime();
+        TheApplication().Trace("  ✅ Pobieranie właściwości standardowego PropertySet: " + (end8 - start8) + " ms");
+
+        TheApplication().Trace("---------------------------------------");
+    }
+}
