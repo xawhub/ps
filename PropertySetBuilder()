@@ -7,7 +7,12 @@ function PropertySetBuilder() {
 
 // 📌 **Tworzenie nowego PropertySet**
 PropertySetBuilder.prototype.create = function(name, parentName) {
-    var parent = this.propertySets[parentName] || this.root;
+    var parent;
+    if (this.propertySets[parentName]) {
+        parent = this.propertySets[parentName];
+    } else {
+        parent = this.root;
+    }
 
     var child = TheApplication().NewPropertySet();
     child.SetType(name);
@@ -62,7 +67,12 @@ PropertySetBuilder.prototype.setHierarchy = function(inputs) {
 
 // 📌 **Łączenie kilku PropertySet w jeden (dowolny parent)**
 PropertySetBuilder.prototype.mergeSets = function(targetParent, setsArray) {
-    var parent = this.propertySets[targetParent] || this.root;
+    var parent;
+    if (this.propertySets[targetParent]) {
+        parent = this.propertySets[targetParent];
+    } else {
+        parent = this.root;
+    }
     for (var i = 0; i < setsArray.length; i++) {
         var child = this.propertySets[setsArray[i]];
         if (child) {
@@ -73,7 +83,10 @@ PropertySetBuilder.prototype.mergeSets = function(targetParent, setsArray) {
 
 // 📌 **Pobieranie PropertySet**
 PropertySetBuilder.prototype.getPropertySet = function(name) {
-    return this.propertySets[name] || null;
+    if (this.propertySets[name]) {
+        return this.propertySets[name];
+    }
+    else return null;
 };
 
 // 📌 **Pobieranie właściwości z PropertySet**
