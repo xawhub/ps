@@ -1,0 +1,76 @@
+// 📌 **Główna metoda obsługująca serwis**
+function Service_PreInvokeMethod(methodName, inputs, outputs) {
+    var builder = new PropertySetBuilder();
+    var name, parent, setsValue, setsArray, props, key, ps;
+
+    if (methodName === "CreatePropertySet") {
+        name = inputs.GetProperty("Name");
+        parent = inputs.GetProperty("Parent");
+
+        if (!parent) {
+            parent = "Root";
+        }
+
+        builder.create(name, parent);
+        outputs.AddChild(builder.get());
+        return CancelOperation;
+    }
+
+    if (methodName === "SetStructure") {
+        name = inputs.GetProperty("Name");
+        props = inputs.GetProperty("Properties");
+
+        if (!props) {
+            props = "";
+        }
+
+        builder.setStructure(name, props);
+        outputs.AddChild(builder.get());
+        return CancelOperation;
+    }
+
+    if (methodName === "SetHierarchy") {
+        builder.setHierarchy(inputs);
+        outputs.AddChild(builder.get());
+        return CancelOperation;
+    }
+
+    if (methodName === "MergeSets") {
+        setsValue = inputs.GetProperty("Sets");
+        setsArray = [];
+
+        if (setsValue) {
+            setsArray = setsValue.split(",");
+        }
+
+        parent = inputs.GetProperty("TargetParent");
+
+        if (!parent) {
+            parent = "Root";
+        }
+
+        builder.mergeSets(parent, setsArray);
+        outputs.AddChild(builder.get());
+        return CancelOperation;
+    }
+
+    if (methodName === "GetPropertySet") {
+        ps = builder.getPropertySet(inputs.GetProperty("Name"));
+        if (ps) {
+            outputs.AddChild(ps);
+        }
+        return CancelOperation;
+    }
+
+    if (methodName === "GetProperties") {
+        props = builder.getProperties(inputs.GetProperty("Name"));
+        if (props) {
+            for (key in props) {
+                outputs.SetProperty(key, props[key]);
+            }
+        }
+        return CancelOperation;
+    }
+
+    return ContinueOperation;
+}
