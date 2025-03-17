@@ -1,0 +1,103 @@
+function PropertySetBuilder() {
+    var app = TheApplication();
+    this.root = app.NewPropertySet();
+    this.root.SetType("Root");
+    this.propertySets = { Root: this.root }; // Mapa dla szybkiego dostępu
+}
+
+// 📌 **Tworzenie nowego PropertySet**
+PropertySetBuilder.prototype.create = function(name, parentName) {
+    var parent = this.propertySets[parentName] || this.root;
+
+    var child = TheApplication().NewPropertySet();
+    child.SetType(name);
+    parent.AddChild(child);
+    this.propertySets[name] = child;
+    return child;
+};
+
+// 📌 **Ustawianie struktury PropertySet per rodzic**
+PropertySetBuilder.prototype.setStructure = function(name, structure) {
+    var ps = this.propertySets[name];
+    if (!ps) {
+        TheApplication().RaiseErrorText("Błąd: PropertySet '" + name + "' nie istnieje.");
+    }
+
+    var key = "", value = "", isKey = true, len = structure.length;
+    for (var i = 0; i < len; i++) {
+        var ch = structure[i];
+
+        if (ch === '=') {
+            isKey = false;
+        } else if (ch === ';' || i === len - 1) {
+            if (i === len - 1) value += ch;
+            ps.SetProperty(key, value);
+            key = "";
+            value = "";
+            isKey = true;
+        } else {
+            if (isKey) key += ch;
+            else value += ch;
+        }
+    }
+};
+
+// 📌 **Ustawianie struktury całej hierarchii**
+PropertySetBuilder.prototype.setHierarchy = function(inputs) {
+    var propNames = inputs.GetPropertyNames(), len = propNames.length, i = 0, name = "", props = "", parent = "Root";
+
+    while (i < len) {
+        var ch = propNames[i];
+        if (ch === ',') {
+            this.create(name, parent);
+            this.setStructure(name, inputs.GetProperty(name));
+            name = "";
+            props = "";
+        } else {
+            name += ch;
+        }
+        i++;
+    }
+};
+
+// 📌 **Łączenie kilku PropertySet w jeden (dowolny parent)**
+PropertySetBuilder.prototype.mergeSets = function(targetParent, setsArray) {
+    var parent = this.propertySets[targetParent] || this.root;
+    for (var i = 0; i < setsArray.length; i++) {
+        var child = this.propertySets[setsArray[i]];
+        if (child) {
+            parent.AddChild(child);
+        }
+    }
+};
+
+// 📌 **Pobieranie PropertySet**
+PropertySetBuilder.prototype.getPropertySet = function(name) {
+    return this.propertySets[name] || null;
+};
+
+// 📌 **Pobieranie właściwości z PropertySet**
+PropertySetBuilder.prototype.getProperties = function(name) {
+    var ps = this.propertySets[name];
+    if (!ps) return null;
+
+    var propNames = ps.GetPropertyNames(), len = propNames.length, i = 0, key = "", properties = {};
+
+    while (i < len) {
+        var ch = propNames[i];
+        if (ch === ',' || i === len - 1) {
+            if (i === len - 1) key += ch;
+            properties[key] = ps.GetProperty(key);
+            key = "";
+        } else {
+            key += ch;
+        }
+        i++;
+    }
+    return properties;
+};
+
+// 📌 **Pobieranie głównego PropertySet**
+PropertySetBuilder.prototype.get = function() {
+    return this.root;
+};
