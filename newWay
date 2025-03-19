@@ -1,17 +1,5 @@
-// Przykład użycia testu
-var psTest = TheApplication().NewPropertySet();
-psTest.SetProperty("RootName", "Customers");
-psTest.SetProperty("RecordPrefix", "Customer");
+// Pełny kod Business Service do zarządzania PropertySetami
 
-var psOutput = TheApplication().NewPropertySet();
-TestPerformance(psTest, psOutput);
-
-for (var i = 0; i < psOutput.GetChildCount(); i++) {
-    var psResult = psOutput.GetChild(i);
-    TheApplication().Trace("Iterations: " + psResult.GetProperty("Iterations") + ", Execution Time: " + psResult.GetProperty("ExecutionTime") + "ms");
-}
-
-// Cały kod Business Service
 function Service_PreInvokeMethod(MethodName, Inputs, Outputs) {
     if (MethodName === "AddOrUpdateRecords") {
         AddOrUpdateRecords(Inputs, Outputs);
@@ -25,8 +13,69 @@ function Service_PreInvokeMethod(MethodName, Inputs, Outputs) {
     } else if (MethodName === "GetRecordsFromPath") {
         GetRecordsFromPath(Inputs, Outputs);
         return CancelOperation;
+    } else if (MethodName === "RemoveRecord") {
+        RemoveRecord(Inputs, Outputs);
+        return CancelOperation;
+    } else if (MethodName === "RemoveLevel") {
+        RemoveLevel(Inputs, Outputs);
+        return CancelOperation;
+    } else if (MethodName === "AddMultipleRecords") {
+        AddMultipleRecords(Inputs, Outputs);
+        return CancelOperation;
     }
     return ContinueOperation;
+}
+
+function NavigateToPath(root, path, createIfNotExist) {
+    var parts = path.split("/");
+    var current = root;
+    for (var i = 0; i < parts.length; i++) {
+        var found = false;
+        for (var j = 0; j < current.GetChildCount(); j++) {
+            var child = current.GetChild(j);
+            if (child.GetType() === parts[i]) {
+                current = child;
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            if (!createIfNotExist) return null;
+            var newChild = TheApplication().NewPropertySet();
+            newChild.SetType(parts[i]);
+            current.AddChild(newChild);
+            current = newChild;
+        }
+    }
+    return current;
+}
+
+function AddOrUpdateRecords(inputs, outputs) {
+    var root = inputs.GetChild(0);
+    var recordType = inputs.GetProperty("RecordType");
+    var key = inputs.GetProperty("Key");
+    var value = inputs.GetProperty("Value");
+    var psTarget = NavigateToPath(root, recordType, true);
+    
+    var existingRecord = null;
+    for (var i = 0; i < psTarget.GetChildCount(); i++) {
+        var child = psTarget.GetChild(i);
+        if (child.GetProperty("Key") === key) {
+            existingRecord = child;
+            break;
+        }
+    }
+    
+    if (existingRecord) {
+        existingRecord.SetProperty("Value", value);
+    } else {
+        var newRecord = TheApplication().NewPropertySet();
+        newRecord.SetType("Record");
+        newRecord.SetProperty("Key", key);
+        newRecord.SetProperty("Value", value);
+        psTarget.AddChild(newRecord);
+    }
+    outputs.AddChild(root);
 }
 
 function GetValueFromPath(inputs, outputs) {
@@ -38,65 +87,65 @@ function GetValueFromPath(inputs, outputs) {
     }
 }
 
-function GetRecordsFromPath(inputs, outputs) {
+function RemoveLevel(inputs, outputs) {
     var path = inputs.GetProperty("Path");
     var psRoot = inputs.GetChild(0);
-    var psTarget = NavigateToPath(psRoot, path, false);
-    if (psTarget) {
-        for (var i = 0; i < psTarget.GetChildCount(); i++) {
-            var record = psTarget.GetChild(i);
-            var psOutput = TheApplication().NewPropertySet();
-            psOutput.SetType(record.GetType());
-            for (var j = 0; j < record.GetPropertyCount(); j++) {
-                var key = record.GetPropertyName(j);
-                psOutput.SetProperty(key, record.GetProperty(key));
+    var parentPath = path.substring(0, path.lastIndexOf("/"));
+    var psParent = NavigateToPath(psRoot, parentPath, false);
+    if (psParent) {
+        for (var i = 0; i < psParent.GetChildCount(); i++) {
+            if (psParent.GetChild(i).GetType() === path.split("/").pop()) {
+                psParent.RemoveChild(i);
+                break;
             }
-            outputs.AddChild(psOutput);
         }
     }
+    outputs.AddChild(psRoot);
 }
 
 function TestPerformance(inputs, outputs) {
+    var iterations = [10, 1000, 100000];
     var app = TheApplication();
-    var rootName = inputs.GetProperty("RootName"); // np. Customers, Products, Invoices
-    var recordPrefix = inputs.GetProperty("RecordPrefix"); // np. Customer, Product, Invoice
-    var testSizes = [10, 1000, 100000];
-    var psResults = app.NewPropertySet();
-    
-    for (var i = 0; i < testSizes.length; i++) {
-        var iterations = testSizes[i];
-        var psRoot, startTime, endTime;
-        psRoot = app.NewPropertySet();
-        startTime = new Date().getTime();
-        
-        for (var j = 0; j < iterations; j++) {
-            var psRecord = app.NewPropertySet();
-            psRecord.SetType(recordPrefix + j);
-            psRecord.SetProperty("Attribute", "Value_" + j);
-            psRoot.AddChild(psRecord);
-        }
-        
-        endTime = new Date().getTime();
-        var timeTaken = endTime - startTime;
-        var psResult = app.NewPropertySet();
-        psResult.SetProperty("Iterations", iterations);
-        psResult.SetProperty("ExecutionTime", timeTaken);
-        psResults.AddChild(psResult);
-        
-        SaveResultsToFile(rootName, recordPrefix, iterations, timeTaken);
-    }
-    outputs.AddChild(psResults);
-}
-
-function SaveResultsToFile(rootName, recordPrefix, iterations, timeTaken) {
-    var app = TheApplication();
-    var fileName = "C:\\SiebelLog\\PerformanceTest.txt";
     var fileService = app.GetService("FINS Data Export Service");
     var psInputs = app.NewPropertySet();
     var psOutputs = app.NewPropertySet();
+    var rootName = "TestRoot";
+    var recordPrefix = "Record";
     
-    psInputs.SetProperty("FileName", fileName);
-    psInputs.SetProperty("Append", "true");
-    psInputs.SetProperty("Data", "Root: " + rootName + ", Prefix: " + recordPrefix + ", Iterations: " + iterations + ", Time: " + timeTaken + "ms\n");
-    fileService.InvokeMethod("WriteToFile", psInputs, psOutputs);
+    for (var i = 0; i < iterations.length; i++) {
+        var count = iterations[i];
+        var startTime = new Date().getTime();
+        
+        var rootPS = app.NewPropertySet();
+        rootPS.SetType(rootName);
+        
+        for (var j = 0; j < count; j++) {
+            var newRecord = app.NewPropertySet();
+            newRecord.SetType("Record");
+            newRecord.SetProperty("Key", recordPrefix + j);
+            newRecord.SetProperty("Value", "TestValue" + j);
+            rootPS.AddChild(newRecord);
+        }
+        
+        var endTime = new Date().getTime();
+        var elapsedTime = endTime - startTime;
+        
+        psInputs.SetProperty("FileName", "C:\\SiebelLog\\PerformanceTest.txt");
+        psInputs.SetProperty("Append", "true");
+        psInputs.SetProperty("Data", "Test Iterations: " + count + " Time: " + elapsedTime + "ms\n");
+        fileService.InvokeMethod("WriteToFile", psInputs, psOutputs);
+    }
+    outputs.SetProperty("Status", "Performance test completed");
+}
+
+// Przykładowe wywołanie testu
+function RunPerformanceTest() {
+    var app = TheApplication();
+    var bs = app.GetService("Property Set Manager");
+    var inputs = app.NewPropertySet();
+    var outputs = app.NewPropertySet();
+    
+    bs.InvokeMethod("TestPerformance", inputs, outputs);
+    var status = outputs.GetProperty("Status");
+    TheApplication().RaiseErrorText("Test Completed: " + status);
 }
