@@ -15,14 +15,233 @@ skinparam TitleBackgroundColor Cyan
 skinparam TitleBorderThickness 1.5
 skinparam TitleBorderRoundCorner 15
 
+title VBC Query: Contact Navigation (Passive Read)
+
+participant "Applet VBC" as Applet
+participant "VBC (Logic)" as VBC
+participant "Contact BC" as Contact
+participant "DPS.Profile" as ProfileAPI
+participant "DPS.RnP" as RNP
+
+note over VBC: User navigates to Contact view\n(Query event is triggered on VBC)
+
+alt [TMO Profile Id and TMO MultiPartyCompany are EMPTY]
+    
+    VBC -> ProfileAPI: GET /profile (email=Contact.Email)
+    ProfileAPI --> VBC: profile data or None
+    
+    opt [Profile FOUND and contains relatedParties with Client ID]
+        note over VBC: Verify if relatedParties (adminCompany)\ncontains Client ID (from Contact join)
+        VBC -> Contact: populate [TMO Profile Id]\nand [TMO MultiPartyCompany] on BC
+    end
+    note over VBC: If profile or entity is missing, NO POST is made.\nFields remain empty.
+    
+else [TMO Profile Id is POPULATED, but TMO MultiPartyCompany is EMPTY]
+    
+    VBC -> ProfileAPI: GET /profile/{profileId}
+    ProfileAPI --> VBC: profile data
+    
+    opt [Profile contains relatedParties with Client ID]
+        note over VBC: Verify if relatedParties (adminCompany)\ncontains Client ID
+        VBC -> Contact: populate [TMO MultiPartyCompany] on BC
+    end
+    note over VBC: Missing entity is NOT added via POST.\nField remains empty.
+
+else [Both fields on Contact BC are POPULATED]
+    note over VBC: No background sync with DPS.Profile needed
+end
+
+== Fetch permissions for Applet ==
+
+alt [Both TMO Profile Id and TMO MultiPartyCompany are POPULATED]
+    VBC -> RNP: GET /permissions\n(query: profileId AND multipartyCompanyId)
+    RNP --> VBC: list of permissions for THIS company
+    VBC --> Applet: Render data (or empty rows if none)
+else [Any of the fields is still EMPTY]
+    note over VBC: Skip RNP call (missing context)
+    VBC --> Applet: Render empty VBC view
+end
+
+center footer Copyright T-Mobile Polska S.A.
+@enduml
+
+
+@startuml
+autonumber "[001] "
+skinparam maxmessagesize 200
+
+<style>
+sequenceDiagram {
+    participant {
+        padding 20
+    }
+}
+</style>
+
+skinparam TitleBorderColor red
+skinparam TitleBackgroundColor Cyan
+skinparam TitleBorderThickness 1.5
+skinparam TitleBorderRoundCorner 15
+
+title UC1: Create or fetch Profile on demand (with Multiparty check)
+
+participant "VBC (Logic)" as VBC
+participant "Contact BC" as Contact
+participant "DPS.Profile" as ProfileAPI
+
+note over VBC: User triggers Insert action on VBC
+
+alt [Profile Id and Multiparty Company Id are EMPTY]
+    
+    VBC -> ProfileAPI: GET /profile (email=Contact.Email)
+    ProfileAPI --> VBC: profile data or None
+    
+    alt [profile found]
+        note over VBC: check if profile contains relatedParties\n(entityReferredType: Customer, role: adminCompany, id: clientId)
+        
+        alt [relatedParties entity missing]
+            note over VBC: add missing relatedParties to profile
+            VBC -> ProfileAPI: POST /profile/{profileId}/relatedParties\n(payload: [{entityReferredType: "Customer", role: "adminCompany", id: clientId}])
+            ProfileAPI --> VBC: 200 OK / 201 Created
+        end
+        
+        note over VBC: save fetched Profile Id\nand Multiparty Company Id
+        VBC -> Contact: update fields on Contact BC
+        
+    else [profile not found]
+        note over VBC: Try to create profile on demand
+        VBC -> ProfileAPI: POST /profile
+        ProfileAPI --> VBC: profile data (201 Created)
+        
+        note over VBC: save new Profile Id\nand Multiparty Company Id
+        VBC -> Contact: update fields on Contact BC
+    end
+
+else [Profile Id is POPULATED, but Multiparty Company Id is EMPTY]
+    
+    VBC -> ProfileAPI: GET /profile/{profileId}
+    ProfileAPI --> VBC: profile data
+    
+    note over VBC: check if profile contains relatedParties\n(entityReferredType: Customer, role: adminCompany, id: clientId)
+    
+    alt [relatedParties entity missing]
+        note over VBC: add missing relatedParties to profile
+        VBC -> ProfileAPI: POST /profile/{profileId}/relatedParties\n(payload: [{entityReferredType: "Customer", role: "adminCompany", id: clientId}])
+        ProfileAPI --> VBC: 200 OK / 201 Created
+    end
+    
+    note over VBC: save Multiparty Company Id
+    VBC -> Contact: update Multiparty Company Id on Contact BC
+
+else [Both Profile Id and Multiparty Company Id are POPULATED]
+    note over VBC: Profile and Company context already exist,\nskip DPS.Profile API calls
+end
+
+center footer Copyright T-Mobile Polska S.A.
+@enduml
+
+@startuml
+autonumber "[001] "
+skinparam maxmessagesize 200
+
+<style>
+sequenceDiagram {
+    participant {
+        padding 20
+    }
+}
+</style>
+
+skinparam TitleBorderColor red
+skinparam TitleBackgroundColor Cyan
+skinparam TitleBorderThickness 1.5
+skinparam TitleBorderRoundCorner 15
+
+title UC2: Insert role(s) or billing profile(s) (Scoped to MultipartyCompany)
+
+actor "User" as User
+participant "Applet VBC" as Applet
+participant "VBC (Logic)" as VBC
+participant "DPS.RnP" as RNP
+
+User -> Applet: trigger add action (Single or Bulk)
+Applet -> VBC: Action triggered
+
+note over VBC: check if Profile fields are populated\non Contact BC
+alt [Profile fields are EMPTY]
+    ref over VBC: UC1: Create or fetch Profile on demand
+end
+
+alt [Single Insert (Role or Billing Profile)]
+    note over VBC: Single addition (OnePortalRole or technicalRole)
+    VBC -> RNP: GET /permissions\n(query: profileId AND multipartyCompanyId)
+    RNP --> VBC: list of current permissions for THIS company
+    
+    alt [role/profile already exists in THIS company]
+        note over Applet: show error message:\n"Duplicate - role/profile already exists"
+    else [role/profile not found]
+        VBC -> RNP: POST /permissions
+        RNP --> VBC: permission data (201 Created)
+        note over Applet: record added, refresh view
+    end
+
+else [Bulk Insert: "Add complete set" (Digital Identity)]
+    note over VBC: Add all missing OnePortalRole permissions
+    VBC -> RNP: GET /permissions\n(query: profileId AND multipartyCompanyId)
+    RNP --> VBC: list of current permissions for THIS company
+    
+    note over VBC: determine missing roles by comparing\nall available roles with assigned ones
+    
+    loop [for each missing OnePortalRole]
+        VBC -> RNP: POST /permissions\n(payload with OnePortalRole)
+        RNP --> VBC: 201 Created
+    end
+    note over Applet: records added, refresh view
+
+else [Bulk Insert: "Add all" (Billing Profiles)]
+    note over VBC: Add all missing billing profiles
+    VBC -> VBC: fetch all Billing Profiles associated\nwith Customer Account
+    
+    VBC -> RNP: GET /permissions\n(query: profileId AND multipartyCompanyId)
+    RNP --> VBC: list of current permissions for THIS company
+    
+    note over VBC: filter out already assigned billing profiles\n(technicalRole on BillingAccount)
+    
+    loop [for each missing Billing Profile]
+        VBC -> RNP: POST /permissions\n(payload with technicalRole)
+        RNP --> VBC: 201 Created
+    end
+    note over Applet: records added, refresh view
+end
+
+center footer Copyright T-Mobile Polska S.A.
+@enduml
+
+@startuml
+autonumber "[001] "
+skinparam maxmessagesize 200
+
+<style>
+sequenceDiagram {
+    participant {
+        padding 20
+    }
+}
+</style>
+
+skinparam TitleBorderColor red
+skinparam TitleBackgroundColor Cyan
+skinparam TitleBorderThickness 1.5
+skinparam TitleBorderRoundCorner 15
+
 title UC3: Delete role(s) & disconnect Profile from Company
 
-actor "user" as User
+actor "User" as User
 participant "Applet VBC" as Applet
-participant "VBC (Logika)" as VBC
-participant "Osoba Kontaktowa\n(Contact BC)" as Contact
-participant "RNP (DPS API)" as RNP
-participant "Profile API" as ProfileAPI
+participant "VBC (Logic)" as VBC
+participant "Contact BC" as Contact
+participant "DPS.RnP" as RNP
+participant "DPS.Profile" as ProfileAPI
 
 User -> Applet: trigger delete action
 Applet -> VBC: Action triggered (Single or Bulk)
@@ -31,7 +250,7 @@ alt [Single Delete]
     VBC -> RNP: PATCH /permissions (status=inactive)
     RNP --> VBC: 200 OK
     
-else [Bulk Delete: "Usuń wszystkie" / "Usuń komplet"]
+else [Bulk Delete: "Delete all" / "Delete complete set"]
     note over VBC: identify all active roles for the current applet
     loop [for each active role in applet]
         VBC -> RNP: PATCH /permissions (status=inactive)
@@ -59,144 +278,3 @@ note over Applet: refresh view
 
 center footer Copyright T-Mobile Polska S.A.
 @enduml
-
-
-
-@startuml
-autonumber "[001] "
-skinparam maxmessagesize 200
-
-<style>
-sequenceDiagram {
-    participant {
-        padding 20
-    }
-}
-</style>
-
-skinparam TitleBorderColor red
-skinparam TitleBackgroundColor Cyan
-skinparam TitleBorderThickness 1.5
-skinparam TitleBorderRoundCorner 15
-
-title UC2: Insert role(s) (Scoped to MultipartyCompany)
-
-actor "user" as User
-participant "Applet VBC" as Applet
-participant "VBC (Logika)" as VBC
-participant "RNP (DPS API)" as RNP
-
-User -> Applet: trigger add action (Single or Bulk)
-Applet -> VBC: Action triggered
-
-note over VBC: check if Profile fields are populated\non Contact BC
-alt [Profile fields are EMPTY]
-    ref over VBC: UC1: Create or fetch Profile on demand
-end
-
-alt [Single Insert (Role or Billing Profile)]
-    note over VBC: Single addition (OnePortalRole or technicalRole)
-    VBC -> RNP: GET /permissions\n(query: profileId AND multipartyCompanyId)
-    RNP --> VBC: list of current permissions for THIS company
-    
-    alt [role/profile already exists in THIS company]
-        note over Applet: show error message:\n"Duplikat - taka rola/profil już istnieje w tej firmie"
-    else [role/profile not found]
-        VBC -> RNP: POST /permissions
-        RNP --> VBC: permission data (201 Created)
-        note over Applet: record added, refresh view
-    end
-
-else [Bulk Insert: "Dodaj komplet" (Digital Identity)]
-    note over VBC: Add all missing OnePortalRole permissions
-    VBC -> RNP: GET /permissions\n(query: profileId AND multipartyCompanyId)
-    RNP --> VBC: list of current permissions for THIS company
-    
-    note over VBC: determine missing roles by comparing\nall available roles with assigned ones
-    
-    loop [for each missing OnePortalRole]
-        VBC -> RNP: POST /permissions\n(payload with OnePortalRole)
-        RNP --> VBC: 201 Created
-    end
-    note over Applet: records added, refresh view
-
-else [Bulk Insert: "Dodaj wszystkie" (Billing Profiles)]
-    note over VBC: Add all missing billing profiles
-    VBC -> VBC: fetch all Billing Profiles associated\nwith Customer Account
-    
-    VBC -> RNP: GET /permissions\n(query: profileId AND multipartyCompanyId)
-    RNP --> VBC: list of current permissions for THIS company
-    
-    note over VBC: filter out already assigned billing profiles\n(technicalRole on BillingAccount)
-    
-    loop [for each missing Billing Profile]
-        VBC -> RNP: POST /permissions\n(payload with technicalRole)
-        RNP --> VBC: 201 Created
-    end
-    note over Applet: records added, refresh view
-end
-
-center footer Copyright T-Mobile Polska S.A.
-@enduml
-
-
-
-@startuml
-autonumber "[001] "
-skinparam maxmessagesize 200
-
-<style>
-sequenceDiagram {
-    participant {
-        padding 20
-    }
-}
-</style>
-
-skinparam TitleBorderColor red
-skinparam TitleBackgroundColor Cyan
-skinparam TitleBorderThickness 1.5
-skinparam TitleBorderRoundCorner 15
-
-title UC1: Create or fetch Profile on demand
-
-participant "VBC (Logika)" as VBC
-participant "Osoba Kontaktowa\n(Contact BC)" as Contact
-participant "Profile API" as ProfileAPI
-
-opt [Profile Id and Multiparty Company Id are EMPTY]
-    note over VBC: User triggers insert action on VBC
-    
-    VBC -> ProfileAPI: GET /profile (email=Contact.Email)
-    ProfileAPI --> VBC: profile data or None
-    
-    alt [profile found]
-        note over VBC: check if profile contains relatedParties\n(entityReferredType: Customer, role: adminCompany, id: nrKlienta)
-        
-        alt [relatedParties entity exists]
-            note over VBC: save fetched Profile Id\nand Multiparty Company Id
-            VBC -> Contact: update fields on Contact BC
-            
-        else [relatedParties entity missing]
-            note over VBC: add missing relatedParties to profile
-            VBC -> ProfileAPI: POST /profile/{profileId}/relatedParties\n(payload: [{entityReferredType: "Customer", role: "adminCompany", id: nrKlienta}])
-            ProfileAPI --> VBC: 200 OK / 201 Created
-            
-            note over VBC: save fetched Profile Id\nand Multiparty Company Id
-            VBC -> Contact: update fields on Contact BC
-        end
-        
-    else [profile not found]
-        note over VBC: Try to create profile on demand
-        VBC -> ProfileAPI: POST /profile
-        ProfileAPI --> VBC: profile data (201 Created)
-        
-        note over VBC: save new Profile Id\nand Multiparty Company Id
-        VBC -> Contact: update fields on Contact BC
-    end
-end
-
-center footer Copyright T-Mobile Polska S.A.
-@enduml
-
-
