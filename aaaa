@@ -1,75 +1,202 @@
-// Business Service do zarządzania hierarchią PropertySet w Siebel eScript
-function PropertySetBuilder() {
-    var app = TheApplication();
-    this.root = app.NewPropertySet();
-    this.root.SetType("Root");
-    this.psPool = []; // Pool dla ponownego użycia PropertySet
-    this.nodes = {};  // PRZYWRÓCONA MAPA dla szybszego wyszukiwania
+@startuml
+autonumber "[001] "
+skinparam maxmessagesize 200
+
+<style>
+sequenceDiagram {
+    participant {
+        padding 20
+    }
 }
+</style>
 
-// Pobiera PropertySet z puli lub tworzy nowy
-PropertySetBuilder.prototype.getNewPropertySet = function() {
-    return this.psPool.length > 0 ? this.psPool.pop() : TheApplication().NewPropertySet();
-};
+skinparam TitleBorderColor red
+skinparam TitleBackgroundColor Cyan
+skinparam TitleBorderThickness 1.5
+skinparam TitleBorderRoundCorner 15
 
-// Tworzy nowy PropertySet i przechowuje go jako dziecko `Root`
-PropertySetBuilder.prototype.addChild = function(name) {
-    var child = this.getNewPropertySet();
-    child.SetType(name);
-    this.root.AddChild(child);
-    this.nodes[name] = child; // PRZYWRÓCONA REFERENCJA do węzła
-    return child;
-};
+title UC3: Delete role(s) & disconnect Profile from Company
 
-// Ustawia wartości właściwości w PropertySet
-PropertySetBuilder.prototype.setProperties = function(ps, propertiesString) {
-    var key = "", value = "", isKey = true, len = propertiesString.length;
+actor "user" as User
+participant "Applet VBC" as Applet
+participant "VBC (Logika)" as VBC
+participant "Osoba Kontaktowa\n(Contact BC)" as Contact
+participant "RNP (DPS API)" as RNP
+participant "Profile API" as ProfileAPI
 
-    for (var i = 0; i < len; i++) {
-        var ch = propertiesString[i];
+User -> Applet: trigger delete action
+Applet -> VBC: Action triggered (Single or Bulk)
 
-        if (ch === '=') {
-            isKey = false;
-        } else if (ch === ';' || i === len - 1) {
-            if (i === len - 1 && ch !== ';') value += ch;
-            ps.SetProperty(key, value); // Naprawiony błąd
-            key = "";
-            value = "";
-            isKey = true;
-        } else {
-            if (isKey) key += ch;
-            else value += ch;
-        }
+alt [Single Delete]
+    VBC -> RNP: PATCH /permissions (status=inactive)
+    RNP --> VBC: 200 OK
+    
+else [Bulk Delete: "Usuń wszystkie" / "Usuń komplet"]
+    note over VBC: identify all active roles for the current applet
+    loop [for each active role in applet]
+        VBC -> RNP: PATCH /permissions (status=inactive)
+        RNP --> VBC: 200 OK
+    end
+end
+
+opt [Deleted role(s) were the LAST active on THIS applet]
+    note over VBC: check if any active roles exist on OTHER applets for THIS company
+    VBC -> RNP: GET /permissions\n(query: profileId AND multipartyCompanyId AND status=active)
+    RNP --> VBC: list of active permissions for THIS company
+    
+    opt [List is EMPTY (No active permissions left for THIS company)]
+        note over VBC: disconnect profile from THIS company ONLY
+        VBC -> ProfileAPI: DELETE /profile/{profileId}/relatedParties\n(target: entityReferredType=Customer, role=adminCompany, id=multipartyCompanyId)
+        ProfileAPI --> VBC: 200 OK / 204 No Content
+        
+        note over VBC: clear MultiParty data for this specific Contact in Siebel
+        VBC -> Contact: clear [TMO MultiPartyCompany] field
+        Contact --> VBC: Field cleared
+    end
+end
+
+note over Applet: refresh view
+
+center footer Copyright T-Mobile Polska S.A.
+@enduml
+
+
+
+@startuml
+autonumber "[001] "
+skinparam maxmessagesize 200
+
+<style>
+sequenceDiagram {
+    participant {
+        padding 20
     }
-};
+}
+</style>
 
-// Pobiera wartość właściwości dla danego PropertySet
-PropertySetBuilder.prototype.getProperty = function(name, key) {
-    var ps = this.nodes[name]; // Użycie PRZYWRÓCONEJ MAPY zamiast wyszukiwania w drzewie
-    return ps ? ps.GetProperty(key) : null;
-};
+skinparam TitleBorderColor red
+skinparam TitleBackgroundColor Cyan
+skinparam TitleBorderThickness 1.5
+skinparam TitleBorderRoundCorner 15
 
-// Pobiera wszystkie właściwości jako obiekt
-PropertySetBuilder.prototype.getAllProperties = function(ps) {
-    var propNamesStr = ps.GetPropertyNames();
-    var len = propNamesStr.length, i = 0, key = "", properties = {};
+title UC2: Insert role(s) (Scoped to MultipartyCompany)
 
-    while (i < len) {
-        var ch = propNamesStr[i];
+actor "user" as User
+participant "Applet VBC" as Applet
+participant "VBC (Logika)" as VBC
+participant "RNP (DPS API)" as RNP
 
-        if (ch === ',' || i === len - 1) {
-            if (i === len - 1) key += ch;
-            properties[key] = ps.GetProperty(key);
-            key = "";
-        } else {
-            key += ch;
-        }
-        i++;
+User -> Applet: trigger add action (Single or Bulk)
+Applet -> VBC: Action triggered
+
+note over VBC: check if Profile fields are populated\non Contact BC
+alt [Profile fields are EMPTY]
+    ref over VBC: UC1: Create or fetch Profile on demand
+end
+
+alt [Single Insert (Role or Billing Profile)]
+    note over VBC: Single addition (OnePortalRole or technicalRole)
+    VBC -> RNP: GET /permissions\n(query: profileId AND multipartyCompanyId)
+    RNP --> VBC: list of current permissions for THIS company
+    
+    alt [role/profile already exists in THIS company]
+        note over Applet: show error message:\n"Duplikat - taka rola/profil już istnieje w tej firmie"
+    else [role/profile not found]
+        VBC -> RNP: POST /permissions
+        RNP --> VBC: permission data (201 Created)
+        note over Applet: record added, refresh view
+    end
+
+else [Bulk Insert: "Dodaj komplet" (Digital Identity)]
+    note over VBC: Add all missing OnePortalRole permissions
+    VBC -> RNP: GET /permissions\n(query: profileId AND multipartyCompanyId)
+    RNP --> VBC: list of current permissions for THIS company
+    
+    note over VBC: determine missing roles by comparing\nall available roles with assigned ones
+    
+    loop [for each missing OnePortalRole]
+        VBC -> RNP: POST /permissions\n(payload with OnePortalRole)
+        RNP --> VBC: 201 Created
+    end
+    note over Applet: records added, refresh view
+
+else [Bulk Insert: "Dodaj wszystkie" (Billing Profiles)]
+    note over VBC: Add all missing billing profiles
+    VBC -> VBC: fetch all Billing Profiles associated\nwith Customer Account
+    
+    VBC -> RNP: GET /permissions\n(query: profileId AND multipartyCompanyId)
+    RNP --> VBC: list of current permissions for THIS company
+    
+    note over VBC: filter out already assigned billing profiles\n(technicalRole on BillingAccount)
+    
+    loop [for each missing Billing Profile]
+        VBC -> RNP: POST /permissions\n(payload with technicalRole)
+        RNP --> VBC: 201 Created
+    end
+    note over Applet: records added, refresh view
+end
+
+center footer Copyright T-Mobile Polska S.A.
+@enduml
+
+
+
+@startuml
+autonumber "[001] "
+skinparam maxmessagesize 200
+
+<style>
+sequenceDiagram {
+    participant {
+        padding 20
     }
-    return properties;
-};
+}
+</style>
 
-// Pobiera główny PropertySet
-PropertySetBuilder.prototype.get = function() {
-    return this.root;
-};
+skinparam TitleBorderColor red
+skinparam TitleBackgroundColor Cyan
+skinparam TitleBorderThickness 1.5
+skinparam TitleBorderRoundCorner 15
+
+title UC1: Create or fetch Profile on demand
+
+participant "VBC (Logika)" as VBC
+participant "Osoba Kontaktowa\n(Contact BC)" as Contact
+participant "Profile API" as ProfileAPI
+
+opt [Profile Id and Multiparty Company Id are EMPTY]
+    note over VBC: User triggers insert action on VBC
+    
+    VBC -> ProfileAPI: GET /profile (email=Contact.Email)
+    ProfileAPI --> VBC: profile data or None
+    
+    alt [profile found]
+        note over VBC: check if profile contains relatedParties\n(entityReferredType: Customer, role: adminCompany, id: nrKlienta)
+        
+        alt [relatedParties entity exists]
+            note over VBC: save fetched Profile Id\nand Multiparty Company Id
+            VBC -> Contact: update fields on Contact BC
+            
+        else [relatedParties entity missing]
+            note over VBC: add missing relatedParties to profile
+            VBC -> ProfileAPI: POST /profile/{profileId}/relatedParties\n(payload: [{entityReferredType: "Customer", role: "adminCompany", id: nrKlienta}])
+            ProfileAPI --> VBC: 200 OK / 201 Created
+            
+            note over VBC: save fetched Profile Id\nand Multiparty Company Id
+            VBC -> Contact: update fields on Contact BC
+        end
+        
+    else [profile not found]
+        note over VBC: Try to create profile on demand
+        VBC -> ProfileAPI: POST /profile
+        ProfileAPI --> VBC: profile data (201 Created)
+        
+        note over VBC: save new Profile Id\nand Multiparty Company Id
+        VBC -> Contact: update fields on Contact BC
+    end
+end
+
+center footer Copyright T-Mobile Polska S.A.
+@enduml
+
+
