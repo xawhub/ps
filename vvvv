@@ -1,129 +1,164 @@
-function queryData(Inputs, Outputs) 
-{
-    var searchString = Inputs.GetProperty("search-string") || Inputs.GetProperty("Search Specification");
-    var contactIds = [];
-    
-    // 1. Wyciągamy WSZYSTKIE unikalne "Contact Id" ze skomplikowanego Search Speca
-    if (searchString) {
-        var regexContact = /\[Contact Id\]\s*(?:=|LIKE)\s*['"]([^'"]+)['"]/gi;
-        var match;
-        
-        while ((match = regexContact.exec(searchString)) !== null) {
-            var id = match[1];
-            if (contactIds.indexOf(id) === -1) {
-                contactIds.push(id);
-            }
-        }
+function syncProfileOnDemand(app, wfSvc, bcContact, ssoLogin, accountIntegrationId, currentProfileId) {
+    // Obiekt wynikowy, który zwrócimy do głównej funkcji insertData
+    var result = {
+        profileId: currentProfileId,
+        multipartyCompany: ""
+    };
+
+    if (!ssoLogin || ssoLogin === "") {
+        app.Trace("Brak SSO Login - przerywam synchronizację profilu.");
+        return result; 
     }
 
-    // Jeśli brak ID w zapytaniu (np. błąd UI), kończymy - VBC pokaże pusty aplet
-    if (contactIds.length === 0) {
-        return; 
-    }
+    var psIn = app.NewPropertySet();
+    var psOut = app.NewPropertySet();
+    var respBody = null;
 
-    // Przygotowujemy obiekty Siebela (raz przed pętlą, by nie obciążać pamięci)
-    var boContact = app.GetBusObject("Contact");
-    var bcContact = boContact.GetBusComp("Contact");
-    var wfSvc = app.GetService("Workflow Process Manager");
-    
-    try 
-    {
-        // 2. Pętla dla każdego znalezionego Kontaktu w zapytaniu
-        for (var k = 0; k < contactIds.length; k++) 
-        {
-            var currentContactId = contactIds[k];
-            var profileId = "";
-            var accountIntegrationId = "";
+    try {
+        // ====================================================================
+        // KROK 1: GET Profile (Diagram: [011] GET /profile?query=...)
+        // ====================================================================
+        if (!currentProfileId || currentProfileId === "") {
+            
+            psIn.SetProperty("ProcessName", "TMO profileManagement MAPI");
+            psIn.SetProperty("Input_fields", "id,status,username,loginMethod,relatedParties");
+            psIn.SetProperty("Input_query", "eq(contactMediums.medium.emailAddress," + ssoLogin + ")");
+            
+            wfSvc.InvokeMethod("RunProcess", psIn, psOut);
 
-            // A) Pobieramy wartości bezpośrednio z DB bez blokowania UI
-            bcContact.SetViewMode(AllView);
-            bcContact.ClearToQuery();
-            bcContact.SetSearchSpec("Id", currentContactId);
-            bcContact.ExecuteQuery(ForwardOnly);
-
-            if (bcContact.FirstRecord()) {
-                profileId = bcContact.GetFieldValue("TMO Profile Id");
-                accountIntegrationId = bcContact.GetFieldValue("Account Integration Id"); // Dostosuj ew. nazwę
+            // Bezpieczne parsowanie odpowiedzi (unikamy Null Pointer)
+            if (psOut.GetChildCount() > 0 && psOut.GetChild(0).GetChildCount() > 0) {
+                var c1 = psOut.GetChild(0).GetChild(0);
+                if (c1.GetChildCount() > 0) {
+                    var c2 = c1.GetChild(0);
+                    if (c2.GetChildCount() > 0) {
+                        var c3 = c2.GetChild(0);
+                        if (c3.GetChildCount() > 0) {
+                            respBody = c3.GetChild(0);
+                        }
+                    }
+                }
             }
 
-            // B) Wywołanie API tylko jeśli Kontakt ma Profile Id
-            if (profileId !== "") 
-            {
-                var query = buildQuery(Inputs); 
+            // ====================================================================
+            // KROK 2: Analiza odpowiedzi z GET
+            // ====================================================================
+            if (respBody != null && respBody.GetType() === "RespBody") {
+                // PROFIL ZNALEZIONY
+                result.profileId = respBody.GetProperty("id");
+                var relatedParties = respBody.GetChildCount() > 0 ? respBody.GetChild(0) : null;
+                var isAdminCompanyFound = false;
                 
-                var psIn = app.NewPropertySet();
-                var psOut = app.NewPropertySet();
+                // Sprawdzamy powiązania z firmą (Diagram: check if profile contains adminCompany)
+                if (relatedParties != null) {
+                    for (var i = 0; i < relatedParties.GetChildCount(); i++) {
+                        var child = relatedParties.GetChild(i);
+                        if (child.GetProperty("entityReferredType") === "Customer" &&
+                            child.GetProperty("role") === "adminCompany" &&
+                            child.GetProperty("id") === accountIntegrationId) {
+                            
+                            isAdminCompanyFound = true;
+                            break;
+                        }
+                    }
+                }
 
-                psIn.SetProperty("ProcessName", "TMO permissions MAPI");
-                psIn.SetProperty("Input_TMOSSOId", profileId);
-                psIn.SetProperty("Input_AccountIntegrationId", accountIntegrationId);
-                psIn.SetProperty("Input_Query", query);
-                psIn.SetProperty("Input_Fields", "assetRoles.role.id");
+                // ====================================================================
+                // KROK 3: Brak powiązania z firmą - dodajemy je (Diagram: [031] POST relatedParties)
+                // ====================================================================
+                if (!isAdminCompanyFound) {
+                    psIn.Reset(); 
+                    psOut.Reset();
+                    
+                    psIn.SetProperty("ProcessName", "TMO profileManagementAddRelParties MAPI");
+                    psIn.SetProperty("Account Integration Id", accountIntegrationId);
+                    psIn.SetProperty("Entity Referred Type", "Customer");
+                    psIn.SetProperty("Role", "adminCompany");
+                    psIn.SetProperty("Profile Id", result.profileId);
+                    psIn.SetProperty("Input Integration Object", "Req6ProfileManagementAPI:body");
+                    
+                    wfSvc.InvokeMethod("RunProcess", psIn, psOut);
+                    
+                    if (psOut.GetProperty("Error Code") !== "") {
+                        app.RaiseErrorText("Błąd podczas dodawania powiązania firmy (relatedParties) do istniejącego profilu.");
+                    }
+                }
+                
+                // Ustawiamy multipartyCompany na wartość z pomyślnego procesu
+                result.multipartyCompany = accountIntegrationId;
+
+            } 
+            else {
+                // ====================================================================
+                // KROK 4: PROFIL NIE ZNALEZIONY - Tworzenie od zera (Diagram: [061] POST /profile)
+                // ====================================================================
+                psIn.Reset(); 
+                psOut.Reset();
+                
+                // 4a. Konwersja metody logowania z użyciem TMO REST Utilities
+                var bsTRU = app.GetService("TMO REST Utilities");
+                var psTRUIn = app.NewPropertySet();
+                var psTRUOut = app.NewPropertySet();
+                
+                psTRUIn.SetProperty("LOV Type", "TMO_LOGIN_METHOD");
+                psTRUIn.SetProperty("Siebel LIC", bcContact.GetFieldValue("TMO Login Method"));
+                bsTRU.InvokeMethod("ConvertLICLangToHAL", psTRUIn, psTRUOut);
+                
+                var convertedLoginMethod = psTRUOut.GetProperty("HAL LIC");
+                var contactIntegrationId = bcContact.GetFieldValue("TMO Contact Id For OnePortal");
+
+                // 4b. Tworzenie profilu
+                psIn.SetProperty("ProcessName", "TMO profileManagementCreate MAPI");
+                psIn.SetProperty("Input_ACCOUNT_INT_ID", accountIntegrationId);
+                psIn.SetProperty("Input_CONTACT_INT_ID", contactIntegrationId);
+                psIn.SetProperty("Input_CONTACT_LOGIN_SSO", ssoLogin);
+                psIn.SetProperty("Input_CONTACT_OTP_MSISDN", bcContact.GetFieldValue("TMO OTP MSISDN"));
+                psIn.SetProperty("Input_CONTACT_NAME", bcContact.GetFieldValue("First Name"));
+                psIn.SetProperty("Input_CONTACT_LASTNAME", bcContact.GetFieldValue("Last Name"));
+                psIn.SetProperty("Input_CONTACT_LOGINMETHOD", convertedLoginMethod);
                 
                 wfSvc.InvokeMethod("RunProcess", psIn, psOut);
 
-                // C) Bezpieczne parsowanie odpowiedzi (unikamy Null Pointer)
-                if (psOut.GetChildCount() > 0) {
-                    var respResponsePS = psOut.GetChild(0);
-                    if (respResponsePS && respResponsePS.GetChildCount() > 0) {
-                        var listResponsePS = respResponsePS.GetChild(0);
-                        if (listResponsePS && listResponsePS.GetChildCount() > 0) {
-                            var resp200PS = listResponsePS.GetChild(0);
-                            if (resp200PS && resp200PS.GetChildCount() > 0) {
-                                var listRespBodyPS = resp200PS.GetChild(0);
-                                
-                                if (listRespBodyPS && listRespBodyPS.GetType() === "ListOfRespBody") {
-                                    
-                                    for (var i = 0; i < listRespBodyPS.GetChildCount(); i++) {
-                                        var respBodyPS = listRespBodyPS.GetChild(i);
-                                        
-                                        if (respBodyPS.GetChildCount() > 0) {
-                                            var listAssetRolesPS = respBodyPS.GetChild(0);
-                                            
-                                            if (listAssetRolesPS && listAssetRolesPS.GetChildCount() > 0) {
-                                                var assetRolesPS = listAssetRolesPS.GetChild(0);
-                                                
-                                                if (assetRolesPS && assetRolesPS.GetChildCount() > 0) {
-                                                    var listRolePS = assetRolesPS.GetChild(0);
-                                                    
-                                                    if (listRolePS && listRolePS.GetChildCount() > 0) {
-                                                        var rolePS = listRolePS.GetChild(0);
-                                                        var roleId = rolePS.GetProperty("id");
-                                                        
-                                                        // D) Budowanie wiersza dla VBC
-                                                        var row = app.NewPropertySet();
-                                                        row.SetProperty("Integration Id", respBodyPS.GetProperty("id"));
-                                                        row.SetProperty("Role", getRoleValue("TMO HAL LIC", roleId, "Value"));
-                                                        row.SetProperty("Description", getRoleValue("TMO HAL LIC", roleId, "Desc"));
-                                                        
-                                                        // KLUCZOWE: Ustawiamy z powrotem ID kontaktu. 
-                                                        // Dzięki temu Siebel w ułamku sekundy sam nałoży na te wyniki 
-                                                        // filtry użytkownika z UI (np. LIKE '*OnePortal*') i nawiasy.
-                                                        row.SetProperty("Contact Id", currentContactId);
-                                                        
-                                                        Outputs.AddChild(row);
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    } // end for loop (roles)
-                                }
-                            }
-                        }
+                // 4c. Bezpieczne parsowanie odpowiedzi z tworzenia profilu
+                respBody = null;
+                if (psOut.GetChildCount() > 0 && psOut.GetChild(0).GetChildCount() > 0) {
+                    var pc1 = psOut.GetChild(0).GetChild(0);
+                    if (pc1.GetChildCount() > 0) {
+                        respBody = pc1.GetChild(0);
                     }
-                } // end bezpiecznego parsowania
-                
-                // Czyścimy property sety WF po każdym strzale w pętli
-                psIn = null;
-                psOut = null;
+                }
+
+                if (respBody != null && respBody.GetType() === "RespBody") {
+                    result.profileId = respBody.GetProperty("id");
+                    result.multipartyCompany = accountIntegrationId;
+                } else {
+                    app.RaiseErrorText("Błąd zewnętrznego API podczas tworzenia Profilu Cyfrowego.");
+                }
             }
-        } // end for loop (contactIds)
-    } 
-    finally 
-    {
-        // Finalne sprzątanie obiektów dla pamięci serwera
-        if (bcContact != null) bcContact = null;
-        if (boContact != null) boContact = null;
-        if (wfSvc != null) wfSvc = null;
+        }
+
+        // ====================================================================
+        // KROK 5: Zapis zaktualizowanych danych na rekordzie Contact
+        // ====================================================================
+        if (result.profileId !== "") {
+            // Zapisujemy bezpośrednio na przekazanej instancji BC - bezpieczne dla pamięci UI
+            bcContact.SetFieldValue("TMO Profile Id", result.profileId);
+            bcContact.SetFieldValue("TMO Multiparty Company", result.multipartyCompany);
+            bcContact.WriteRecord();
+            
+            // Opcjonalnie: Jeśli inne skrypty w Twojej architekturze wciąż wymagają starych atrybutów, 
+            // możesz je tutaj zostawić, choć architektonicznie staramy się od nich odchodzić.
+            app.SetProfileAttr("TMO Profile Id For OnePortal", result.profileId);
+            app.SetProfileAttr("TMO Multiparty Company For OnePortal", result.multipartyCompany);
+        }
+
+    } catch (e) {
+        throw e;
+    } finally {
+        if (psOut != null) psOut = null;
+        if (psIn != null) psIn = null;
     }
+
+    // Zwracamy zaktualizowane ID do insertData
+    return result;
 }
