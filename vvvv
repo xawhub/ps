@@ -1,55 +1,314 @@
-function PerformanceTest() {
-    var testSizes = [10, 100, 1000, 10000, 100000];
-
-    for (var i = 0; i < testSizes.length; i++) {
-        var size = testSizes[i];
-        TheApplication().Trace("Test dla " + size + " rekordów:");
-
-        // Test: PropertySetBuilder
-        var start1 = new Date().getTime();
-        var builder = new PropertySetBuilder();
-        for (var j = 0; j < size; j++) {
-            var name = "Node" + j;
-            var child = builder.addChild(name); // PRZYJMUJE PropertySet zamiast nazwy
-            builder.setProperties(child, "Key1=Value" + j + ";Key2=Extra" + j);
+function WebApplet_InvokeMethod (MethodName)
+{
+    try 
+    {
+        // Przechwytujemy moment PO odświeżeniu wartości z picklisty
+        if (MethodName == "PostChanges") 
+        {
+            // Wymuszamy fizyczny zapis rekordu na komponencie
+            this.BusComp().WriteRecord();
         }
-        var psBuilder = builder.get();
-        var end1 = new Date().getTime();
-        TheApplication().Trace("PropertySetBuilder: " + (end1 - start1) + " ms");
+    }
+    catch(e)
+    {
+        throw e;
+    }
+}
 
-        // Test: Standardowe PropertySety
-        var start2 = new Date().getTime();
-        var rootPs = TheApplication().NewPropertySet();
-        rootPs.SetType("Root");
-        for (var k = 0; k < size; k++) {
-            var child = TheApplication().NewPropertySet();
-            child.SetType("Node" + k);
-            child.SetProperty("Key1", "Value" + k);
-            child.SetProperty("Key2", "Extra" + k);
-            rootPs.AddChild(child);
-        }
-        var end2 = new Date().getTime();
-        TheApplication().Trace("Standard PropertySet: " + (end2 - start2) + " ms");
+if (typeof(SiebelAppFacade.TMORefreshSharedVBCPM) === "undefined") {
+    SiebelJS.Namespace("SiebelAppFacade.TMORefreshSharedVBCPM");
+    
+    define("siebel/custom/TMORefreshSharedVBCPM", ["siebel/listpmodel"],
+        function () {
+            SiebelAppFacade.TMORefreshSharedVBCPM = (function () {
 
-        // Pobieranie danych: PropertySetBuilder
-        var start3 = new Date().getTime();
-        var value1 = builder.getProperty("Node" + (size - 1), "Key1"); // Teraz działa poprawnie
-        var end3 = new Date().getTime();
-        TheApplication().Trace("Pobranie PropertySetBuilder: " + (end3 - start3) + " ms");
+                function TMORefreshSharedVBCPM(pm) {
+                    SiebelAppFacade.TMORefreshSharedVBCPM.superclass.constructor.apply(this, arguments);
+                }
 
-        // Pobieranie danych: Standard PropertySet
-        var start4 = new Date().getTime();
-        var nodeFound = null;
-        for (var c = 0; c < rootPs.GetChildCount(); c++) {
-            var childNode = rootPs.GetChild(c);
-            if (childNode.GetType() === "Node" + (size - 1)) {
-                nodeFound = childNode.GetProperty("Key1");
-                break;
+                SiebelJS.Extend(TMORefreshSharedVBCPM, SiebelAppFacade.ListPresentationModel);
+
+                TMORefreshSharedVBCPM.prototype.Init = function () {
+                    SiebelAppFacade.TMORefreshSharedVBCPM.superclass.Init.apply(this, arguments);
+                    // sequence: false oznacza Post-Execute (PO standardowym zapisie)
+                    this.AddMethod("InvokeMethod", this.PostInvokeMethod, { sequence: false, scope: this });
+                };
+
+                TMORefreshSharedVBCPM.prototype.PostInvokeMethod = function (methodName) {
+                    if (methodName === "WriteRecord") {
+                        
+                        var view = SiebelApp.S_App.GetActiveView();
+                        if (view) {
+                            var rolesApplet = view.GetApplet("TMO Contact Digital Profile Roles VBC List Applet");
+                            var billingApplet = view.GetApplet("TMO Contact Managed BP VBC List Applet");
+                            
+                            setTimeout(function() {
+                                if (rolesApplet) rolesApplet.InvokeMethod("ExecuteQuery");
+                                if (billingApplet) billingApplet.InvokeMethod("ExecuteQuery");
+                            }, 150); 
+                        }
+                    }
+                };
+
+                return TMORefreshSharedVBCPM;
+            }());
+            return "SiebelAppFacade.TMORefreshSharedVBCPM";
+        });
+}
+
+
+
+if (typeof(SiebelAppFacade.TMOContactProfileOrchestratorPM) === "undefined") {
+    SiebelJS.Namespace("SiebelAppFacade.TMOContactProfileOrchestratorPM");
+    
+    // Użyj "siebel/pmodel" jeśli główny aplet to formularz, lub "siebel/listpmodel" jeśli to lista
+    define("siebel/custom/TMOContactProfileOrchestratorPM", ["siebel/listpmodel"], 
+        function () {
+            SiebelAppFacade.TMOContactProfileOrchestratorPM = (function () {
+
+                function TMOContactProfileOrchestratorPM(pm) {
+                    SiebelAppFacade.TMOContactProfileOrchestratorPM.superclass.constructor.apply(this, arguments);
+                }
+
+                SiebelJS.Extend(TMOContactProfileOrchestratorPM, SiebelAppFacade.PresentationModel);
+
+                TMOContactProfileOrchestratorPM.prototype.Init = function () {
+                    SiebelAppFacade.TMOContactProfileOrchestratorPM.superclass.Init.apply(this, arguments);
+                    this.AttachPMBinding("ShowSelection", this.CheckAndSyncProfile, { scope: this });
+                };
+
+                TMOContactProfileOrchestratorPM.prototype.Show = function () {
+                    SiebelAppFacade.TMOContactProfileOrchestratorPM.superclass.Show.apply(this, arguments);
+                    this.CheckAndSyncProfile(); // Wywołanie przy pierwszym wejściu
+                };
+
+                TMOContactProfileOrchestratorPM.prototype.CheckAndSyncProfile = function () {
+                    var bc = this.Get("GetBusComp");
+                    
+                    var profileId = bc.GetFieldValue("TMO Profile Id"); 
+                    var contactId = bc.GetFieldValue("Id"); 
+
+                    if (contactId && (!profileId || profileId === "")) {
+                        
+                        var svc = SiebelApp.S_App.GetService("TMO Profile Sync BS"); 
+                        var inPS = SiebelApp.S_App.NewPropertySet();
+                        inPS.SetProperty("ContactId", contactId); 
+
+                        svc.InvokeMethod("SyncProfile", inPS, {
+                            async: true, // Kluczowe dla płynności UI!
+                            scope: this,
+                            cb: function (methodName, inputSet, outputSet) {
+                                var errorCode = outputSet.GetProperty("ErrorCode");
+                                
+                                if (errorCode !== "Error" && errorCode !== "NotFound") { 
+                                    var view = SiebelApp.S_App.GetActiveView();
+                                    if (view) {
+                                        // 1. Odświeżamy bieżący rekord rodzica, by UI pobrał nowe ID z bazy
+                                        this.ExecuteMethod("InvokeMethod", "RefreshRecord"); 
+                                        
+                                        // 2. Odświeżamy aplety VBC, żeby zaciągnęły dane wg nowego ID
+                                        var applet1 = view.GetApplet("TMO Contact Digital Profile Roles VBC List Applet");
+                                        var applet2 = view.GetApplet("TMO Contact Managed BP VBC List Applet");
+
+                                        if (applet1) applet1.InvokeMethod("ExecuteQuery");
+                                        if (applet2) applet2.InvokeMethod("ExecuteQuery");
+                                    }
+                                }
+                            }
+                        });
+                    }
+                };
+
+                return TMOContactProfileOrchestratorPM;
+            }());
+            return "SiebelAppFacade.TMOContactProfileOrchestratorPM";
+        });
+}
+
+
+// W zdarzeniu Service_PreInvokeMethod
+function Service_PreInvokeMethod (MethodName, Inputs, Outputs)
+{
+    if (MethodName == "SyncProfile")
+    {
+        SyncProfile(Inputs, Outputs);
+        return (CancelOperation);
+    }
+    return (ContinueOperation);
+}
+
+// W sekcji general -> declarations (lub poniżej)
+function SyncProfile(Inputs, Outputs)
+{
+    var app = TheApplication();
+    var contactId = Inputs.GetProperty("ContactId");
+    
+    if (contactId == null || contactId == "")
+    {
+        Outputs.SetProperty("ErrorCode", "Error");
+        return;
+    }
+
+    // Nowa, niezależna instancja obiektu biznesowego, aby nie psuć sesji UI
+    var boContact = app.GetBusObject("Contact");
+    var bcContact = boContact.GetBusComp("Contact");
+
+    try
+    {
+        bcContact.SetViewMode(AllView);
+        bcContact.ClearToQuery();
+        bcContact.SetSearchSpec("Id", contactId);
+        bcContact.ExecuteQuery(ForwardOnly);
+
+        if (bcContact.FirstRecord())
+        {
+            var ssoLogin = bcContact.GetFieldValue("TMO SSO Login");
+            var accountIntegrationId = bcContact.GetFieldValue("TMO Account Integration Id For OnePortal"); 
+            
+            if (ssoLogin != "") 
+            {
+                var wfSvc = app.GetService("Workflow Process Manager");
+                var wfIn = app.NewPropertySet();
+                var wfOut = app.NewPropertySet();
+
+                wfIn.SetProperty("ProcessName", "TMO profileManagement MAPI");
+                wfIn.SetProperty("Input_fields", "id,status,username,loginMethod,relatedParties");
+                wfIn.SetProperty("Input_query", "eq(contactMediums.medium.emailAddress," + ssoLogin + ")");
+
+                wfSvc.InvokeMethod("RunProcess", wfIn, wfOut);
+
+                var respBody = wfOut.GetChild(0).GetChild(0).GetChild(0).GetChild(0).GetChild(0);
+                
+                if (respBody != null && respBody.GetType() == "RespBody")
+                {
+                    var profileId = respBody.GetProperty("id");
+                    var relatedParties = respBody.GetChild(0); 
+                    
+                    var isAdminCompanyFound = false;
+                    
+                    if (relatedParties != null)
+                    {
+                        for (var i = 0; i < relatedParties.GetChildCount(); i++)
+                        {
+                            var child = relatedParties.GetChild(i);
+                            if (child.GetProperty("entityReferredType") == "Customer" &&
+                                child.GetProperty("role") == "adminCompany" &&
+                                child.GetProperty("id") == accountIntegrationId) 
+                            {
+                                isAdminCompanyFound = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (profileId != "" && isAdminCompanyFound)
+                    {
+                        // Zapis do bazy
+                        bcContact.SetFieldValue("TMO Profile Id", profileId);
+                        bcContact.SetFieldValue("TMO Multiparty Company", accountIntegrationId); 
+                        bcContact.WriteRecord();
+                        
+                        Outputs.SetProperty("ErrorCode", "");
+                    }
+                    else
+                    {
+                        Outputs.SetProperty("ErrorCode", "NotFound");
+                    }
+                }
             }
         }
-        var end4 = new Date().getTime();
-        TheApplication().Trace("Pobranie Standard PropertySet: " + (end4 - start4) + " ms");
-
-        TheApplication().Trace("---------------------------------------");
     }
+    catch (e)
+    {
+        Outputs.SetProperty("ErrorCode", "Error");
+    }
+    finally
+    {
+        bcContact = null;
+        boContact = null;
+    }
+}
+
+
+function Service_PreInvokeMethod (MethodName, Inputs, Outputs)
+{
+    // ... obsługa Init, PreInsert, Insert ...
+
+    if (MethodName == "Query")
+    {
+        // 1. Pobieramy przekazany przez Siebela Search Specification
+        var searchSpec = Inputs.GetProperty("Search Specification");
+        var contactId = "";
+
+        // 2. Parsujemy Search Spec, aby wyciągnąć ID Kontaktu
+        // Zakładam, że pole docelowe w linku nazywa się "Contact Id" (dostosuj, jeśli jest inne)
+        if (searchSpec != null && searchSpec != "")
+        {
+            // Wyrażenie regularne wyciągające wartość z [Contact Id] = 'Wartosc' lub "Wartosc"
+            var regex = /\[Contact Id\]\s*=\s*["']([^"']+)["']/i;
+            var match = searchSpec.match(regex);
+            
+            if (match && match.length > 1)
+            {
+                contactId = match[1];
+            }
+        }
+
+        // 3. Jeśli mamy ID Kontaktu, pobieramy dane z bazy
+        if (contactId != "")
+        {
+            var app = TheApplication();
+            var boContact = app.GetBusObject("Contact");
+            var bcContact = boContact.GetBusComp("Contact");
+            
+            var profileId = "";
+            var multipartyCompany = "";
+
+            try
+            {
+                bcContact.SetViewMode(AllView);
+                bcContact.ClearToQuery();
+                bcContact.SetSearchSpec("Id", contactId);
+                bcContact.ExecuteQuery(ForwardOnly);
+
+                if (bcContact.FirstRecord())
+                {
+                    // Pobieramy wartości bezpośrednio z DB
+                    profileId = bcContact.GetFieldValue("TMO Profile Id");
+                    multipartyCompany = bcContact.GetFieldValue("TMO Multiparty Company");
+                }
+            }
+            finally
+            {
+                bcContact = null;
+                boContact = null;
+            }
+
+            // 4. Logika VBC
+            if (profileId == null || profileId == "")
+            {
+                // Brak ID Profilu (skrypt Open UI zajmie się jego utworzeniem w tle)
+                // Zwracamy puste dane dla VBC
+                return (ContinueOperation); // Siebel wyrenderuje pusty aplet VBC
+            }
+            else
+            {
+                // Mamy Profil ID! Idziemy pobrać RNP (uprawnienia) z zewnętrznego API
+                
+                // ... Twój kod ...
+                // psIn.SetProperty("Profile Id", profileId);
+                // wfSvc.InvokeMethod("RunProcess", psIn, psOut);
+                // ... budowanie Outputs z odpowiedziami dla VBC ...
+                
+                return (ContinueOperation);
+            }
+        }
+        else
+        {
+            // Brak Contact Id w Search Specu (np. błąd konfiguracyjny widoku)
+            return (ContinueOperation);
+        }
+    }
+    
+    return (ContinueOperation);
 }
