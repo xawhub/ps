@@ -1,214 +1,183 @@
-function updateData(Inputs, Outputs)
+function deleteData(Inputs, Outputs)
 {
     var wfSvc = null;
     var psIn = null;
     var psOut = null;
-
-    var onePortalProfileId = "";
-    var onePortalAccIntegrationId = "";
-    var currentContactId = "";
-
-    var oldIntegrationId = "";
-    var newRole = "";
-    var newRoleId = "";
-
-    // Obiekt contact do pobrania profilu w locie
-    var boContact = null;
+    
+    var isUIContext = false;
+    var activeBO = null;
+    var boContactStandalone = null;
     var bcContact = null;
 
-    var child = null;
-    var i = 0;
-
-    // get
-    var respResponsePS = null;
-    var listResponsePS = null;
-    var resp200PS = null;
-    var listRespBodyPS = null;
-
-    // patch & post
-    var requestPS = null;
-    var validForPS = null;
-    var endDateTimePS = null;
+    var currentContactId = "";
+    var integrationId = "";
+    
+    var onePortalProfileId = "";
+    var onePortalMultiCompany = "";
     var date = null;
     var endDateTime = "";
 
-    try
+    try 
     {
+        fnLog("=============================================");
+        fnLog("| deleteData - START                        |");
+        fnLog("=============================================");
+        fnLog("Inputs: \n" + app.TMODumpPropSet(Inputs));
+
         wfSvc = app.GetService("Workflow Process Manager");
 
         // ==============================================
-        // 1. DYNAMICZNE POBRANIE CONTEXTU Z INPUTS
+        // 1. POBRANIE DANYCH Z INPUTS (Bez ProfileAttr!)
         // ==============================================
-        for (i = 0; i < Inputs.GetChildCount(); i++)
-        {
-            child = Inputs.GetChild(i);
-            var fieldName = child.GetProperty("Field Name");
+        var rowData = Inputs.GetChild(0);
+        if (rowData) {
+            integrationId = rowData.GetProperty("Integration Id");
+            currentContactId = rowData.GetProperty("Contact Id");
+        }
+
+        if (!currentContactId || currentContactId === "") {
+            app.RaiseErrorText("Brak identyfikatora osoby kontaktowej podczas usuwania rekordu!");
+        }
+
+        // ==============================================
+        // 2. USTALENIE KONTEKSTU (UI vs Tło)
+        // ==============================================
+        activeBO = app.ActiveBusObject();
+
+        if (activeBO !== null && activeBO.Name() === "Account") {
+            bcContact = activeBO.GetBusComp("Contact");
+            isUIContext = true;
+            fnLog("| UI Context - Znaleziono BO Account");
+        }
+
+        if (!isUIContext) {
+            boContactStandalone = app.GetBusObject("Contact");
+            bcContact = boContactStandalone.GetBusComp("Contact");
             
-            if (fieldName === "Role")
-            {
-                newRole = child.GetProperty("Field Value");
+            bcContact.SetViewMode(AllView);
+            bcContact.ClearToQuery();
+            bcContact.ActivateField("TMO Profile Id");
+            bcContact.ActivateField("Account Integration Id");
+            bcContact.SetSearchSpec("Id", currentContactId);
+            bcContact.ExecuteQuery(ForwardOnly);
+
+            if (!bcContact.FirstRecord()) {
+                app.RaiseErrorText("Nie znaleziono osoby kontaktowej w bazie!");
             }
-            else if (fieldName === "Integration Id")
-            {
-                oldIntegrationId = child.GetProperty("Field Value");
-            }
-            else if (fieldName === "Contact Id")
-            {
-                currentContactId = child.GetProperty("Field Value");
-            }
+            fnLog("| Not UI Context (Użyto Standalone BO)");
         }
 
-        // Jeśli brakuje Contact Id w polach, spróbujmy pobrać z właściwości głównej Inputs
-        if (!currentContactId) {
-            currentContactId = Inputs.GetProperty("Contact Id");
-        }
+        // Pobranie atrybutów profilu bezpośrednio z Contact BC
+        onePortalProfileId = bcContact.GetFieldValue("TMO Profile Id");
+        onePortalMultiCompany = bcContact.GetFieldValue("Account Integration Id");
 
-        fnLog("updateData - currentContactId = " + currentContactId);
-        fnLog("updateData - oldIntegrationId = " + oldIntegrationId);
-        fnLog("updateData - newRole = " + newRole);
-
-        if (!currentContactId) {
-            TheApplication().RaiseErrorText("Brak kontekstu Contact Id w metodzie Update.");
-            return;
-        }
+        fnLog("Contact Id: " + currentContactId);
+        fnLog("Profile Id: " + onePortalProfileId);
+        fnLog("MultiCompany: " + onePortalMultiCompany);
+        fnLog("Integration Id (Role): " + integrationId);
 
         // ==============================================
-        // 2. POBRANIE DANYCH PROFILU Z BAZY DLA KONTAKTU
+        // 3. PATCH - DEZAKTYWACJA ROLI (DELETE)
         // ==============================================
-        boContact = app.GetBusObject("Contact");
-        bcContact = boContact.GetBusComp("Contact");
-        
-        bcContact.SetViewMode(AllView);
-        bcContact.ClearQuery();
-        bcContact.SetSearchSpec("Id", currentContactId);
-        bcContact.ExecuteQuery(ForwardOnly);
-
-        if (bcContact.FirstRecord())
-        {
-            onePortalProfileId = bcContact.GetFieldValue("TMO Profile Id");
-            onePortalAccIntegrationId = bcContact.GetFieldValue("Account Integration Id");
-        }
-
-        fnLog("onePortalProfileId = " + onePortalProfileId);
-        fnLog("onePortalAccIntegrationId = " + onePortalAccIntegrationId);
-
-        if (!onePortalProfileId || !onePortalAccIntegrationId)
-        {
-            TheApplication().RaiseErrorText("Nie znaleziono danych profilu OnePortal dla tego kontaktu.");
-            return;
-        }
-
-        // Dekodowanie nowej roli na ID techniczne (LIC)
-        newRoleId = getRoleValue("Value", newRole, "TMO HAL LIC");
-        fnLog("newRoleId = " + newRoleId);
-
-        // ==============================================
-        // 3. GET - SPRAWDZENIE CZY ROLA JUŻ ISTNIEJE
-        // ==============================================
-        psIn = app.NewPropertySet();
-        psOut = app.NewPropertySet();
-        
-        psIn.SetProperty("ProcessName", "TMO permissions MAPI");
-        psIn.SetProperty("Input_TMOSSOId", onePortalProfileId);
-        psIn.SetProperty("Input_AccountIntegrationId", onePortalAccIntegrationId);
-        psIn.SetProperty("Input_Query", "contains(assetRoles,and(eq(manageableAsset.entityType,CustomerAccount),eq(role.id," + newRoleId + ")))");
-        psIn.SetProperty("Input_Fields", "assetRoles.role.id");
-        wfSvc.InvokeMethod("RunProcess", psIn, psOut);
-
-        respResponsePS = psOut.GetChild(0);        
-        listResponsePS = respResponsePS.GetChild(0); 
-        resp200PS = listResponsePS.GetChild(0);      
-        listRespBodyPS = resp200PS.GetChild(0);      
-
-        if (listRespBodyPS && listRespBodyPS.GetType() === "ListOfRespBody")
-        {
-            if (listRespBodyPS.GetChildCount() > 0)
-            {
-                TheApplication().RaiseErrorText(TheApplication().LookupMessage("User Defined Errors", "TMO_CONTACT_DIGITAL_PROFILE_ROLE_ERR"));
-                return;
-            }
-        }
-
-        // ==============================================
-        // 4. PATCH - DEZAKTYWACJA STAREJ ROLI
-        // ==============================================
-        fnLog("Calling PATCH Workflow for oldIntegrationId = " + oldIntegrationId);
-
         date = Date.fromSystem(Clib.time());
         endDateTime = Clib.rsprintf("%04d-%02d-%02dT%02d:%02d:%02d.000Z",
-            date.getFullYear(),
-            date.getMonth() + 1,
-            date.getDate(),
-            date.getHours(),
-            date.getMinutes(),
-            date.getSeconds()
+            date.getFullYear(), date.getMonth() + 1, date.getDate(),
+            date.getHours(), date.getMinutes(), date.getSeconds()
         );
 
-        psIn.Reset();
-        psOut.Reset();
-
-        requestPS = app.NewPropertySet();
+        fnLog("Calling PATCH /permissions - deactivate value");
+        var requestPS = app.NewPropertySet();
         requestPS.SetType("Request");
-
-        validForPS = app.NewPropertySet();
+        
+        var validForPS = app.NewPropertySet();
         validForPS.SetType("validFor");
-
-        endDateTimePS = app.NewPropertySet();
+        
+        var endDateTimePS = app.NewPropertySet();
         endDateTimePS.SetType("endDateTime");
         endDateTimePS.SetValue(endDateTime);
-
+        
         validForPS.AddChild(endDateTimePS);
         requestPS.AddChild(validForPS);
         requestPS.SetProperty("status", "inactive");
 
+        psIn = app.NewPropertySet();
+        psOut = app.NewPropertySet();
         psIn.SetProperty("ProcessName", "TMO permissionsUpdate MAPI");
-        psIn.SetProperty("Input_Id", oldIntegrationId);
+        psIn.SetProperty("Input_Id", integrationId);
         psIn.AddChild(requestPS);
 
         wfSvc.InvokeMethod("RunProcess", psIn, psOut);
-        fnLog("Workflow PATCH finished");
+        fnLog("PATCH Permissions Output: \n" + app.TMODumpPropSet(psOut));
 
         // ==============================================
-        // 5. POST - UTWORZENIE NOWEJ ROLI
+        // 4. GET - SPRAWDZENIE CZY ZOSTAŁY INNE ROLE
         // ==============================================
-        fnLog("Calling POST Workflow");
-
+        fnLog("Calling GET - check if deleted role was last");
         psIn.Reset();
         psOut.Reset();
         
-        psIn.SetProperty("ProcessName", "TMO permissionsCreate MAPI");
-        psIn.SetProperty("Input_TMOSSOId", onePortalProfileId);
-        psIn.SetProperty("Input_AccountIntegrationId", onePortalAccIntegrationId);
-        psIn.SetProperty("Input_Affiliation_Detail_Int_Id", newRoleId);
-        psIn.SetProperty("Input_EnityType", "OnePortalPermission");
+        psIn.SetProperty("ProcessName", "TMO permissions MAPI");
+        psIn.SetProperty("Input_TMOSSOID", onePortalProfileId);
+        psIn.SetProperty("Input_AccountIntegrationId", onePortalMultiCompany);
+        psIn.SetProperty("Input_Fields", "assetRoles.role.id");
         
         wfSvc.InvokeMethod("RunProcess", psIn, psOut);
-        fnLog("Workflow POST finished");
+
+        var respBody = null;
+        if (psOut.GetChildCount() > 0 && psOut.GetChild(0).GetChildCount() > 0) {
+            var restResponse = psOut.GetChild(0).GetChild(0);
+            if (restResponse.GetChildCount() > 0) {
+                respBody = restResponse.GetChild(0);
+            }
+        }
+
+        // ==============================================
+        // 5. DELETE I UPDATE KONTAKTU (Jeśli brak ról)
+        // ==============================================
+        if (respBody === null || respBody.GetType() !== "ListOfRespBody" || respBody.GetChildCount() === 0) 
+        {
+            fnLog("No roles found for profile. Removing adminCompany from profile...");
+            
+            psIn.Reset();
+            psOut.Reset();
+            
+            psIn.SetProperty("ProcessName", "TMO profileManagementDelete MAPI");
+            psIn.SetProperty("Input_Contact_SSO_Id", onePortalProfileId);
+            psIn.SetProperty("Input_Contat_Integration_Id", onePortalMultiCompany);
+            
+            wfSvc.InvokeMethod("RunProcess", psIn, psOut);
+            fnLog("DELETE Profile Output: \n" + app.TMODumpPropSet(psOut));
+
+            // Czyszczenie pola na nadrzędnym BC Contact (bezpieczne dzięki detekcji UI)
+            bcContact.SetFieldValue("TMO Multiparty Company", "");
+            bcContact.WriteRecord();
+            
+            fnLog("adminCompany removed from OnePortal profile and Contact BC updated.");
+        } 
+        else 
+        {
+            fnLog("Roles still exist for profile. adminCompany will not be removed.");
+        }
 
         Outputs.SetProperty("Status", "Success");
     }
     catch (e) 
     {
-        fnLog("ERROR in updateData: " + e.toString());
+        fnLog("ERROR in deleteData: " + e.toString());
         throw e;
     }
-    finally
+    finally 
     {
-        // Czyszczenie obiektów biznesowych z pamięci
-        if (bcContact) { bcContact = null; }
-        if (boContact) { boContact = null; }
-
-        endDateTimePS = null;
-        validForPS = null;
-        requestPS = null;
-
-        listRespBodyPS = null;
-        resp200PS = null;
-        listResponsePS = null;
-        respResponsePS = null;
-
-        psOut = null;
+        if (!isUIContext && boContactStandalone) {
+            boContactStandalone = null;
+        }
+        bcContact = null;
+        activeBO = null;
         psIn = null;
+        psOut = null;
         wfSvc = null;
+        fnLog("=============================================");
+        fnLog("| deleteData - STOP                         |");
+        fnLog("=============================================");
     }
 }
