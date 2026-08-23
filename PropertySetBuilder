@@ -1039,3 +1039,43 @@ function WebApplet_PreInvokeMethod(MethodName) {
 
     return (ContinueOperation);
 }
+
+function Service_PreInvokeMethod(MethodName, Inputs, Outputs) {
+    try {
+        // Opcjonalny log, żebyś widział w logach serwera, co dokładnie uderza do Twojego VBC
+        // fnLog("VBC Wywolanie Metody: " + MethodName, LOG_LOW_LVL);
+
+        switch (MethodName) {
+            case "Init":
+                Init(Inputs, Outputs); // Inicjalizacja struktury VBC (definicje pól)
+                return (CancelOperation);
+
+            case "Query":
+                Query(Inputs, Outputs);
+                return (CancelOperation);
+
+            case "Insert":
+                Insert(Inputs, Outputs);
+                return (CancelOperation);
+
+            case "Delete":
+                Delete(Inputs, Outputs);
+                return (CancelOperation);
+
+            // Jeśli profil bilingowy nie wspiera edycji, zostawiamy Update puste lub rzucamy błąd
+            case "Update":
+                // Update(Inputs, Outputs); 
+                // return (CancelOperation);
+                break;
+        }
+
+        // Jeśli wpadnie jakakolwiek inna, standardowa metoda Siebela, przepuszczamy ją dalej
+        return (ContinueOperation);
+
+    } catch (e) {
+        // Jeśli jakikolwiek błąd "przecieknie" przez nasze funkcje (co nie powinno się zdarzyć),
+        // łapiemy go tutaj, żeby zapobiec zawieszeniu aplikacji.
+        TheApplication().Trace("CRITICAL ERROR in VBC PreInvokeMethod (" + MethodName + "): " + e.toString());
+        throw (e);
+    }
+}
