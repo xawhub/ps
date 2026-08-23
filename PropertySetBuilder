@@ -1,83 +1,1041 @@
-// Business Service do zarządzania hierarchią PropertySet w Siebel eScript
-function PropertySetBuilder() {
-    this.root = TheApplication().NewPropertySet();
-    this.root.SetType("Root");
-    this.propertySets = { "Root": this.root }; // Mapa do przechowywania referencji do PropertySetów
+function loadBillingProfiles(ctx, accountId) {
+    var bcBP = null;
+    var localProfilesMap = {}; // Lokalny kontener na dane
+
+    try {
+        bcBP = ctx.bc.BillingProfile;
+
+        // Jeśli brak kontekstu lub konta, po prostu zwracamy pusty słownik
+        if (!bcBP || !accountId) return localProfilesMap;
+
+        bcBP.SetViewMode(AllView);
+        bcBP.ClearToQuery();
+        bcBP.ActivateField("Account Id");
+        bcBP.ActivateField("Name"); 
+        bcBP.ActivateField("Status");
+        bcBP.ActivateField("TMO Recipient Name");
+
+        bcBP.SetSearchSpec("Account Id", accountId);
+        bcBP.ExecuteQuery(ForwardOnly);
+
+        var isRecord = bcBP.FirstRecord();
+        while (isRecord) {
+            var bpName = bcBP.GetFieldValue("Name");
+            localProfilesMap[bpName] = {
+                status: bcBP.GetFieldValue("Status"),
+                recipientName: bcBP.GetFieldValue("TMO Recipient Name")
+            };
+            isRecord = bcBP.NextRecord();
+        }
+        
+        return localProfilesMap;
+
+    } catch (e) {
+        throw (e);
+    } finally {
+        bcBP = null;
+    }
 }
 
-// Tworzy nowy PropertySet na podstawie unikalnej nazwy i rodzica
-PropertySetBuilder.prototype.addChild = function(name, parentName) {
-    var parent = this.propertySets[parentName];
-    if (!parent) {
-        TheApplication().RaiseErrorText("Błąd: Nie znaleziono rodzica '" + parentName + "' dla '" + name + "'.");
+function Query(Inputs, Outputs) {
+    var ctx = {
+        app: TheApplication(),
+        bs: {}, bo: {}, bc: {}, ps: {}
+    };
+
+    initBs(ctx, [{ name: "Workflow Process Manager", alias: "workflowProcessManager" }]);
+    initBoBc(ctx, [{
+        name: "Account", alias: "BillingQuery", isActive: false,
+        bcList: [{ name: "Com Invoice Profile", alias: "BillingProfile" }]
+    }]);
+    
+    var row;
+    var profileId = "";
+    var multiPartyCompany = ""; 
+    var accountId = ""; 
+    var currentContactId = "";
+    var isUIContext = false;
+    var activeBO = null;
+    var bcContact = null;
+    var searchString = Inputs.GetProperty("search-string") || "";
+    var rege;
+    var match;
+    var fieldName = "Billing Profile Number";
+    var sBillProfNumber = "";
+    
+    var billingProfiles = {}; // Lokalna mapa dla bieżącego wywołania
+
+    try {
+        var regexContact = /\[Contact Id\]\s*(?:=|LIKE)\s*['"]([^'"]+)['"]/gi;
+        var matchContact = regexContact.exec(searchString);
+        
+        if (matchContact !== null) {
+            currentContactId = matchContact[1];
+        }
+
+        if (!currentContactId || currentContactId === "") {
+            return (CancelOperation);
+        }
+
+        activeBO = ctx.app.ActiveBusObject();
+        if (activeBO !== null && activeBO.Name() === "Account") {
+            try {
+                bcContact = activeBO.GetBusComp("Contact");
+                isUIContext = true;
+            } catch (e) {}
+        }
+
+        if (!isUIContext) {
+            initBoBc(ctx, [{
+                name: "Contact", alias: "ContactStandalone", isActive: false,
+                bcList: [{ name: "Contact", alias: "ContactBC" }]
+            }]);
+            
+            bcContact = ctx.bc.ContactBC;
+            bcContact.SetViewMode(AllView);
+            bcContact.ClearToQuery();
+            bcContact.ActivateField("TMO Profile Id");
+            bcContact.ActivateField("TMO Multiparty Company");
+            bcContact.ActivateField("Account Id");
+            
+            bcContact.SetSearchSpec("Id", currentContactId);
+            bcContact.ExecuteQuery(ForwardOnly);
+            
+            if (!bcContact.FirstRecord()) return (CancelOperation);
+        }
+
+        profileId = bcContact.GetFieldValue("TMO Profile Id");
+        multiPartyCompany = bcContact.GetFieldValue("TMO Multiparty Company");
+        accountId = bcContact.GetFieldValue("Account Id"); 
+
+        // Ładujemy dane dla bieżącego zapytania na żywo z bazy
+        billingProfiles = loadBillingProfiles(ctx, accountId);
+
+        ctx.ps.customQueryElements = ctx.app.NewPropertySet();
+        rege = new RegExp("\\[" + fieldName + "\\]\\s*(?:=|LIKE)\\s*['\"]([^'\"]+)['\"]", "gi");
+        while ((match = rege.exec(searchString)) != null) {
+            sBillProfNumber = match[1].replace(/\*$/,""); 
+            ctx.ps.customQueryElements.SetProperty(sBillProfNumber, sBillProfNumber);
+        }
+
+        if (profileId !== "" && multiPartyCompany !== "") {
+            ctx.ps.workflowProcessManagerInput = ctx.app.NewPropertySet();
+            ctx.ps.workflowProcessManagerOutput = ctx.app.NewPropertySet();
+
+            propertySetter(ctx.ps.workflowProcessManagerInput, [
+                { name: "Input_AccountIntegrationId", value: multiPartyCompany }, 
+                { name: "Input_TMOSSOID", value: profileId },
+                { name: "Input_Query", value: "contains(assetRoles,and(eq(manageableAsset.entityType,BillingAccount),eq(role.entityType,technicalRole)))" },
+                { name: "Input_Fields", value: "assetRoles.manageableAsset.id" },
+                { name: "ProcessName", value: "TMO permissions MAPI" }
+            ]);
+
+            ctx.bs.workflowProcessManager.InvokeMethod("RunProcess", ctx.ps.workflowProcessManagerInput, ctx.ps.workflowProcessManagerOutput);
+
+            if (ctx.ps.workflowProcessManagerOutput.GetProperty("IntObjectNameResponse") === "Res105RolesandPermissionsAPI:res") {
+                
+                ctx.ps.psListOfRespBody = getDeepChild(ctx.ps.workflowProcessManagerOutput, ["RespBody", "ListOfRespBody"]);
+
+                if (ctx.ps.psListOfRespBody !== null) {
+                    for (var i = 0; i < ctx.ps.psListOfRespBody.GetChildCount(); i++) {
+                        row = ctx.app.NewPropertySet();
+                        
+                        var manageableAsset = getDeepChild(ctx.ps.psListOfRespBody, [i, "ListOfassetRoles", "assetRoles", "ListOfmanageableAsset", "manageableAsset"]);
+                        var bpId = manageableAsset !== null ? manageableAsset.GetProperty("id") : "";
+                        
+                        // Odczyt z lokalnego, świeżego słownika
+                        var bpStatus = billingProfiles[bpId] ? billingProfiles[bpId].status : "";
+                        var bpRecipientName = billingProfiles[bpId] ? billingProfiles[bpId].recipientName : "";
+                        
+                        propertySetter(row, [
+                            { name: "Account Id", value: multiPartyCompany }, 
+                            { name: "Billing Profile Number", value: bpId },
+                            { name: "Permission Id", value: ctx.ps.psListOfRespBody.GetChild(i).GetProperty("id") },
+                            { name: "Contact Id", value: currentContactId },
+                            { name: "Billing Profile Status", value: bpStatus },
+                            { name: "Billing Profile Reciepent Name", value: bpRecipientName }
+                        ]);
+
+                        if (ctx.ps.customQueryElements.GetFirstProperty() === "" || ctx.ps.customQueryElements.GetProperty(row.GetProperty("Billing Profile Number")) !== "") {
+                            Outputs.AddChild(row);
+                        }
+                        row = null;
+                    }
+                }
+            }
+        }
+
+    } catch (e) {
+        throw (e);
+    } finally {
+        row = null;
+        bcContact = null;
+        activeBO = null;
+        cleanup(ctx);
+        return (CancelOperation);
     }
+}
 
-    var child = TheApplication().NewPropertySet();
-    child.SetType(name);
-    parent.AddChild(child);
-    this.propertySets[name] = child; // Przechowujemy referencję
-    return child;
-};
 
-// Ustawia wartości właściwości w PropertySet
-PropertySetBuilder.prototype.setProperties = function(name, propertiesString) {
-    var ps = this.propertySets[name];
-    if (!ps) {
-        TheApplication().RaiseErrorText("Błąd: PropertySet '" + name + "' nie istnieje.");
+function initBs(ctx, bsList) {
+    for (var i = 0; i < bsList.length; i++) {
+        var alias = bsList[i].alias || bsList[i].name;
+        ctx.bs[alias] = ctx.app.GetService(bsList[i].name);
+    }
+}
+
+function initBoBc(ctx, boList) {
+    for (var i = 0; i < boList.length; i++) {
+        var boDef = boList[i];
+        var boAlias = boDef.alias || boDef.name;
+        
+        // Zabezpieczenie przed tworzeniem nowej instancji na aktywnym widoku
+        if (boDef.isActive) {
+            ctx.bo[boAlias] = ctx.app.ActiveBusObject();
+        } else {
+            ctx.bo[boAlias] = ctx.app.GetBusObject(boDef.name);
+        }
+        
+        if (boDef.bcList) {
+            for (var j = 0; j < boDef.bcList.length; j++) {
+                var bcDef = boDef.bcList[j];
+                var bcAlias = bcDef.alias || bcDef.name;
+                ctx.bc[bcAlias] = ctx.bo[boAlias].GetBusComp(bcDef.name);
+            }
+        }
+    }
+}
+
+function propertySetter(propSet, properties) {
+    if (!propSet || !properties) return;
+    for (var i = 0; i < properties.length; i++) {
+        propSet.SetProperty(properties[i].name, properties[i].value);
+    }
+}
+
+function getDeepChild(ps, path) {
+    var current = ps;
+    for (var i = 0; i < path.length; i++) {
+        if (!current || typeof current.GetChildCount !== "function") return null;
+
+        var step = path[i];
+        
+        if (typeof step === "number") {
+            // Szukanie po indeksie (używane w pętlach)
+            if (step >= current.GetChildCount()) return null;
+            current = current.GetChild(step);
+        } 
+        else if (typeof step === "string") {
+            // Szukanie po nazwie węzła (Typie)
+            var found = false;
+            for (var j = 0; j < current.GetChildCount(); j++) {
+                if (current.GetChild(j).GetType() === step) {
+                    current = current.GetChild(j);
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) return null;
+        }
+    }
+    return current;
+}
+
+function cleanup(ctx) {
+    if (!ctx) return;
+
+    // Zwalnianie PropertySetów (automatycznie odpinane przez GC silnika JavaScript)
+    for (var psKey in ctx.ps) {
+        ctx.ps[psKey] = null;
+    }
+    // Zwalnianie Business Components (ubicie obiektów COM)
+    for (var bcKey in ctx.bc) {
+        ctx.bc[bcKey] = null;
+    }
+    // Zwalnianie Business Objects (ubicie obiektów COM)
+    for (var boKey in ctx.bo) {
+        ctx.bo[boKey] = null;
+    }
+    // Zwalnianie Business Services (ubicie obiektów COM)
+    for (var bsKey in ctx.bs) {
+        ctx.bs[bsKey] = null;
     }
     
-    var properties = propertiesString.split(";");
+    // Na koniec usuwamy referencję do samej aplikacji
+    ctx.app = null;
+}
+
+function initBoBc(ctx, boList) {
+    for (var i = 0; i < boList.length; i++) {
+        var boDef = boList[i];
+        var boAlias = boDef.alias || boDef.name;
+        
+        if (boDef.isActive) {
+            ctx.bo[boAlias] = ctx.app.ActiveBusObject();
+            // ZABEZPIECZENIE:
+            if (ctx.bo[boAlias] === null) {
+                throw new Error("Framework ctx: Zazadano aktywnego BO '" + boDef.name + "', ale kontekst UI nie istnieje!");
+            }
+        } else {
+            ctx.bo[boAlias] = ctx.app.GetBusObject(boDef.name);
+        }
+        
+        if (boDef.bcList) {
+            for (var j = 0; j < boDef.bcList.length; j++) {
+                var bcDef = boDef.bcList[j];
+                var bcAlias = bcDef.alias || bcDef.name;
+                ctx.bc[bcAlias] = ctx.bo[boAlias].GetBusComp(bcDef.name);
+            }
+        }
+    }
+}
+
+function cleanup(ctx) {
+    if (!ctx) return;
+
+    if (ctx.ps) {
+        for (var psKey in ctx.ps) { ctx.ps[psKey] = null; }
+    }
+    if (ctx.bc) {
+        for (var bcKey in ctx.bc) { ctx.bc[bcKey] = null; }
+    }
+    if (ctx.bo) {
+        for (var boKey in ctx.bo) { ctx.bo[boKey] = null; }
+    }
+    if (ctx.bs) {
+        for (var bsKey in ctx.bs) { ctx.bs[bsKey] = null; }
+    }
+    
+    ctx.app = null;
+}
+
+function SyncOnePortalProfile(ctx, bcContact) {
+    // Inicjujemy obiekt zwrotny (zgodnie ze standardem, jakiego oczekiwały Twoje stare skrypty)
+    var result = {
+        profileId: "",
+        multipartyCompany: ""
+    };
+
+    var psRestBody = null;
+    var psRelatedParties = null;
+    var sProfileId = "";
+    var sAccountContactIntegrationIdFromProfile = "";
+    
+    try {
+        fnLog("---------------------------------------\n", LOG_INFO_LVL);
+        fnLog("| SYNC ONE PORTAL PROFILE - START     |\n", LOG_INFO_LVL);
+        fnLog("---------------------------------------\n", LOG_INFO_LVL);
+
+        if (!bcContact) {
+            throw new Error("Funkcja SyncOnePortalProfile wymaga przekazania aktywnego bcContact!");
+        }
+
+        // Zbieramy dane z Kontaktu do lokalnych zmiennych (bezpieczniejsze w pętli UI/Tło)
+        var accountIntId = bcContact.GetFieldValue("Account Integration Id");
+        var ssoLogin     = bcContact.GetFieldValue("TMO SSO Login");
+        var contactId    = bcContact.GetFieldValue("Id");
+        var otpMsisdn    = bcContact.GetFieldValue("TMO OTP MSISDN");
+        var firstName    = bcContact.GetFieldValue("First Name");
+        var lastName     = bcContact.GetFieldValue("Last Name");
+        var loginMethod  = bcContact.GetFieldValue("TMO Login Method");
+
+        // 1. GET PROFILE - Sprawdzamy czy profil istnieje
+        ctx.ps.psWpmSyncIn = ctx.app.NewPropertySet();
+        ctx.ps.psWpmSyncOut = ctx.app.NewPropertySet();
+
+        propertySetter(ctx.ps.psWpmSyncIn, [
+            { name: "Input_fields", value: "id,status,username,loginMethod,relatedParties" },
+            { name: "Input_query", value: 'eq(contactMediums.medium.emailAddress,"' + ssoLogin + '")' },
+            { name: "ProcessName", value: "TMO profileManagement MAPI" }
+        ]);
+
+        fnLog("| GET PROFILE...\n", LOG_INFO_LVL);
+        ctx.bs.workflowProcessManager.InvokeMethod("RunProcess", ctx.ps.psWpmSyncIn, ctx.ps.psWpmSyncOut);
+
+        var objNameResponse = ctx.ps.psWpmSyncOut.GetProperty("IntObjectNameResponse");
+        psRestBody = getDeepChild(ctx.ps.psWpmSyncOut, ["RespBody"]);
+
+        // --- SCENARIUSZ A: PROFIL ISTNIEJE ---
+        if (objNameResponse === "Res15ProfileManagementAPI:res" && psRestBody !== null) {
+            sProfileId = psRestBody.GetProperty("id");
+            
+            psRelatedParties = psRestBody.GetChild(0); 
+            if (psRelatedParties) {
+                for (var j = 0; j < psRelatedParties.GetChildCount(); j++) {
+                    var party = psRelatedParties.GetChild(j);
+                    if (party.GetProperty("entityReferredType") === "Customer" && party.GetProperty("role") === "adminCompany") {
+                        sAccountContactIntegrationIdFromProfile = party.GetProperty("id");
+                    }
+                }
+            }
+
+            if (sAccountContactIntegrationIdFromProfile === accountIntId) {
+                // 100% poprawności - wystarczy upewnić się, że Siebel ma to zapisane
+                bcContact.SetFieldValue("TMO Profile Id", sProfileId);
+                bcContact.SetFieldValue("TMO Multiparty Company", sAccountContactIntegrationIdFromProfile);
+                bcContact.WriteRecord();
+            } else {
+                // PATCH - Brakuje powiązania profilu z konkretną firmą
+                ctx.ps.psWpmPatchIn = ctx.app.NewPropertySet();
+                ctx.ps.psWpmPatchOut = ctx.app.NewPropertySet();
+                fnLog("| PATCH PROFILE - Add Related Parties...\n", LOG_INFO_LVL);
+
+                propertySetter(ctx.ps.psWpmPatchIn, [
+                    { name: "Account Integration Id", value: accountIntId },
+                    { name: "Entity Referred Type", value: "Customer" },
+                    { name: "Role", value: "adminCompany" },
+                    { name: "Profile Id", value: sProfileId },
+                    { name: "Input Integration Object", value: "Req6ProfileManagementAPI:body" },
+                    { name: "ProcessName", value: "TMO profileManagementAddRelParties MAPI" }
+                ]);
+
+                ctx.bs.workflowProcessManager.InvokeMethod("RunProcess", ctx.ps.psWpmPatchIn, ctx.ps.psWpmPatchOut);
+
+                if (ctx.ps.psWpmPatchOut.GetProperty("Error Code") !== "") {
+                    ctx.app.RaiseErrorText("Blad synchronizacji (PATCH). Brak mozliwosci przypisania firmy.");
+                } else {
+                    sAccountContactIntegrationIdFromProfile = accountIntId;
+                    bcContact.SetFieldValue("TMO Profile Id", sProfileId);
+                    bcContact.SetFieldValue("TMO Multiparty Company", accountIntId);
+                    bcContact.WriteRecord();
+                }
+            }
+        } 
+        // --- SCENARIUSZ B: PROFIL NIE ISTNIEJE (Tworzymy - POST) ---
+        else if (objNameResponse === "Res15ProfileManagementAPI:res" && getDeepChild(ctx.ps.psWpmSyncOut, ["RespHeader"]) !== null) {
+            ctx.ps.psWpmPostIn = ctx.app.NewPropertySet();
+            ctx.ps.psWpmPostOut = ctx.app.NewPropertySet();
+            fnLog("| POST PROFILE - CREATE...\n", LOG_INFO_LVL);
+            
+            var convertedLoginMethod = convertLICLangToHAL(ctx, loginMethod); // Pamiętaj o dostępności tej funkcji
+
+            propertySetter(ctx.ps.psWpmPostIn, [
+                { name: "Input_ACCOUNT_INT_ID", value: accountIntId },
+                { name: "Input_CONTACT_INT_ID", value: contactId },
+                { name: "Input_CONTACT_LOGIN_SSO", value: ssoLogin },
+                { name: "Input_CONTACT_OTP_MSISDN", value: otpMsisdn },
+                { name: "Input_CONTACT_NAME", value: firstName },
+                { name: "Input_CONTACT_LASTNAME", value: lastName },
+                { name: "Input_CONTACT_LOGINMETHOD", value: convertedLoginMethod },
+                { name: "ProcessName", value: "TMO profileManagementCreate MAPI" }
+            ]);
+
+            ctx.bs.workflowProcessManager.InvokeMethod("RunProcess", ctx.ps.psWpmPostIn, ctx.ps.psWpmPostOut);
+
+            if (ctx.ps.psWpmPostOut.GetProperty("IntObjectNameResponse") === "Res29ProfileManagementAPI:res") { // Dostosuj jeśli IntObject się różni
+                var postRespBody = getDeepChild(ctx.ps.psWpmPostOut, ["RespBody"]);
+                
+                if (postRespBody !== null) {
+                    sProfileId = postRespBody.GetProperty("id");
+                    psRelatedParties = postRespBody.GetChild(0); 
+                    
+                    if (psRelatedParties) {
+                        for (var k = 0; k < psRelatedParties.GetChildCount(); k++) {
+                            var createdParty = psRelatedParties.GetChild(k);
+                            if (createdParty.GetProperty("entityReferredType") === "Customer" && createdParty.GetProperty("role") === "adminCompany") {
+                                sAccountContactIntegrationIdFromProfile = createdParty.GetProperty("id");
+                            }
+                        }
+                    }
+
+                    if (sAccountContactIntegrationIdFromProfile === accountIntId) {
+                        bcContact.SetFieldValue("TMO Profile Id", sProfileId);
+                        bcContact.SetFieldValue("TMO Multiparty Company", sAccountContactIntegrationIdFromProfile);
+                        bcContact.WriteRecord();
+                    } else {
+                        ctx.app.RaiseErrorText("Niezgodnosc Account Integration Id zwroconego po POST.");
+                    }
+                }
+            } else {
+                ctx.app.RaiseErrorText("Blad utworzenia profilu OnePortal (POST). MAPI zwrocilo nieoczekiwany obiekt.");
+            }
+        } else {
+            ctx.app.RaiseErrorText("Nieoczekiwana odpowiedz z systemu podczas weryfikacji profilu (GET).");
+        }
+
+        // Zwracamy obiekt ze wszystkim, czego potrzebuje dowolny VBC (Role lub Bilingi)
+        result.profileId = sProfileId;
+        result.multipartyCompany = sAccountContactIntegrationIdFromProfile;
+        
+        return result;
+
+    } catch (e) {
+        fnLog("ERROR in SyncOnePortalProfile: " + e.toString(), LOG_INFO_LVL);
+        throw (e);
+    } finally {
+        fnLog("---------------------------------------\n", LOG_INFO_LVL);
+        fnLog("| SYNC ONE PORTAL PROFILE - STOP      |\n", LOG_INFO_LVL);
+        fnLog("---------------------------------------\n", LOG_INFO_LVL);
+    }
+}
+
+function Insert(Inputs, Outputs) {
+    var ctx = {
+        app: TheApplication(),
+        bs: {}, bo: {}, bc: {}, ps: {}
+    };
+
+    var tmoProfileId = "";
+    var multiPartyCompany = "";
+    var bpNumberForInsert = "";
+    var contactId = "";
+    
+    var isUIContext = false;
+    var activeBO = null;
+    var bcContact = null;
+
+    try {
+        initBs(ctx, [{ name: "Workflow Process Manager", alias: "workflowProcessManager" }]);
+
+        fnLog("INPUTS DUMP : \n" + ctx.app.TMODumpPropSet(Inputs, 0) + "\n", LOG_HIGH_LVL);
+        fnLog("---------------------------------------\n", LOG_INFO_LVL);
+        fnLog("| ADD MANAGED BILLING PROFILE - START |\n", LOG_INFO_LVL);
+        fnLog("---------------------------------------\n", LOG_INFO_LVL);
+
+        // 1. ODCZYT DANYCH WEJŚCIOWYCH
+        if (Inputs.GetChildCount() === 0) {
+            ctx.app.RaiseErrorText("Brak danych wejsciowych w operacji Insert.");
+        }
+        var rowData = Inputs.GetChild(0);
+        
+        bpNumberForInsert = rowData.GetProperty("Billing Profile Number");
+        contactId = rowData.GetProperty("Contact Id"); 
+        
+        if (!bpNumberForInsert || bpNumberForInsert === "") {
+            ctx.app.RaiseErrorText("Wprowadz numer profilu bilingowego (Billing Profile Number).");
+        }
+        if (!contactId || contactId === "") {
+            ctx.app.RaiseErrorText("Brak identyfikatora osoby kontaktowej (Contact Id) podczas dodawania rekordu!");
+        }
+
+        // 2. LOGIKA KONTEKSTU (UI vs Not UI)
+        activeBO = ctx.app.ActiveBusObject();
+        if (activeBO !== null && activeBO.Name() === "Account") {
+            try {
+                bcContact = activeBO.GetBusComp("Contact");
+                isUIContext = true;
+                fnLog("| UI Context - Znaleziono BO Account\n", LOG_INFO_LVL);
+            } catch (e) {}
+        }
+
+        if (!isUIContext) {
+            fnLog("| Not UI Context (Standalone BO)\n", LOG_INFO_LVL);
+            initBoBc(ctx, [{
+                name: "Contact", alias: "ContactStandalone", isActive: false,
+                bcList: [{ name: "Contact", alias: "ContactBC" }]
+            }]);
+            
+            bcContact = ctx.bc.ContactBC;
+            bcContact.SetViewMode(AllView);
+            bcContact.ClearToQuery();
+            
+            // Aktywacja wszystkich pól potrzebnych nam i funkcji SyncOnePortalProfile
+            bcContact.ActivateField("TMO Profile Id");
+            bcContact.ActivateField("TMO Multiparty Company");
+            bcContact.ActivateField("TMO SSO Login");
+            bcContact.ActivateField("Account Integration Id");
+            bcContact.ActivateField("TMO OTP MSISDN");
+            bcContact.ActivateField("First Name");
+            bcContact.ActivateField("Last Name");
+            bcContact.ActivateField("TMO Login Method");
+            
+            bcContact.SetSearchSpec("Id", contactId);
+            bcContact.ExecuteQuery(ForwardOnly);
+            
+            if (!bcContact.FirstRecord()) {
+                ctx.app.RaiseErrorText("Nie znaleziono osoby kontaktowej!");
+            }
+        }
+
+        tmoProfileId = bcContact.GetFieldValue("TMO Profile Id");
+        multiPartyCompany = bcContact.GetFieldValue("TMO Multiparty Company");
+        var ssoLogin = bcContact.GetFieldValue("TMO SSO Login");
+
+        // 3. SYNCHRONIZACJA ONE PORTAL
+        if (!tmoProfileId || tmoProfileId === "" || !multiPartyCompany || multiPartyCompany === "") {
+            fnLog("| Brak Profile ID lub Multiparty Company, uruchamiam SyncOnePortalProfile...\n", LOG_INFO_LVL);
+            
+            var syncResult = SyncOnePortalProfile(ctx, bcContact);
+            
+            tmoProfileId = syncResult.profileId;
+            multiPartyCompany = syncResult.multipartyCompany;
+        }
+
+        if (!tmoProfileId || tmoProfileId === "" || !multiPartyCompany || multiPartyCompany === "") {
+            ctx.app.RaiseErrorText("Nie udalo sie znalezc / utworzyc profilu OnePortal!");
+        }
+
+        // 4. WALIDACJA DUPLIKATÓW PRZEZ API (GET)
+        fnLog("| Check if permission already exists GET /permissions\n", LOG_INFO_LVL);
+        ctx.ps.psGetMapiIn = ctx.app.NewPropertySet();
+        ctx.ps.psGetMapiOut = ctx.app.NewPropertySet();
+
+        propertySetter(ctx.ps.psGetMapiIn, [
+            { name: "ProcessName", value: "TMO permissions MAPI" },
+            { name: "Input_AccountIntegrationId", value: multiPartyCompany },
+            { name: "Input_TMOSSOID", value: tmoProfileId },
+            { name: "Input_Query", value: "contains(assetRoles,and(eq(manageableAsset.entityType,BillingAccount),eq(manageableAsset.id," + bpNumberForInsert + ")))" }
+        ]);
+
+        ctx.bs.workflowProcessManager.InvokeMethod("RunProcess", ctx.ps.psGetMapiIn, ctx.ps.psGetMapiOut);
+
+        var checkListBody = getDeepChild(ctx.ps.psGetMapiOut, ["RespBody", "ListOfRespBody"]);
+        if (checkListBody !== null && checkListBody.GetChildCount() > 0) {
+            // Profil już posiada to przypisanie bilingowe
+            ctx.app.RaiseErrorText(ctx.app.LookupMessage("User Defined Errors", "TMO_CONTACT_DIGITAL_PROFILE_ROLE_ERR")); 
+        }
+
+        // 5. INTEGRACJA Z MAPI (POST)
+        fnLog("| POST /permissions\n", LOG_INFO_LVL);
+        ctx.ps.psPostMapiIn = ctx.app.NewPropertySet();
+        ctx.ps.psPostMapiOut = ctx.app.NewPropertySet();
+
+        propertySetter(ctx.ps.psPostMapiIn, [
+            { name: "ProcessName", value: "TMO permissionsCreate MAPI" },
+            { name: "Input_AccountIntegrationId", value: multiPartyCompany },
+            { name: "Input_TMOSSOId", value: tmoProfileId },
+            { name: "Input_Affiliation_BP_Int_Id", value: "DUMMY" },
+            { name: "Input_Affiliation_BP_Name", value: bpNumberForInsert }
+        ]);
+        
+        ctx.bs.workflowProcessManager.InvokeMethod("RunProcess", ctx.ps.psPostMapiIn, ctx.ps.psPostMapiOut);
+        
+        // 6. POBRANIE WYGENEROWANEGO ID Z MULESOFTU I ZASILENIE OUTPUTS
+        var newIntegrationId = "";
+        var postRespBody = getDeepChild(ctx.ps.psPostMapiOut, ["RespBody"]);
+        if (postRespBody !== null) {
+            newIntegrationId = postRespBody.GetProperty("id");
+        }
+
+        fnLog("New Integration Id (Permission Id) = " + newIntegrationId, LOG_INFO_LVL);
+
+        var rowOut = ctx.app.NewPropertySet();
+        propertySetter(rowOut, [
+            { name: "Account Id", value: multiPartyCompany },
+            { name: "Billing Profile Number", value: bpNumberForInsert },
+            { name: "Permission Id", value: newIntegrationId }, // Niezbędne do późniejszego Delete
+            { name: "Contact Id", value: contactId },
+            { name: "Billing Profile Status", value: "Active" } 
+        ]);
+        
+        Outputs.AddChild(rowOut);
+
+    } catch (e) {
+        fnLog("ERROR in Insert: " + e.toString(), LOG_INFO_LVL);
+        throw (e);
+    } finally {
+        // Sprzątanie referencji
+        bcContact = null;
+        activeBO = null;
+        cleanup(ctx);
+        
+        fnLog("---------------------------------------\n", LOG_INFO_LVL);
+        fnLog("| ADD MANAGED BILLING PROFILE - STOP  |\n", LOG_INFO_LVL);
+        fnLog("---------------------------------------\n", LOG_INFO_LVL);
+        
+        return (CancelOperation);
+    }
+}
+
+function Delete(Inputs, Outputs) {
+    var ctx = {
+        app: TheApplication(),
+        bs: {}, bo: {}, bc: {}, ps: {}
+    };
+
+    var permissionId = "";
+    var contactId = "";
+    var tmoProfileId = "";
+    var multiPartyCompany = "";
+    
+    var isUIContext = false;
+    var activeBO = null;
+    var bcContact = null;
+
+    try {
+        initBs(ctx, [{ name: "Workflow Process Manager", alias: "workflowProcessManager" }]);
+
+        fnLog("INPUTS DUMP : \n" + ctx.app.TMODumpPropSet(Inputs, 0) + "\n", LOG_HIGH_LVL);
+        fnLog("========================================================\n", LOG_INFO_LVL);
+        fnLog("| DELETE MANAGED BILLING PROFILE - START               |\n", LOG_INFO_LVL);
+        fnLog("========================================================\n", LOG_INFO_LVL);
+
+        // 1. ODCZYT DANYCH Z INTERFEJSU
+        if (Inputs.GetChildCount() === 0) {
+            ctx.app.RaiseErrorText("Brak danych wejsciowych w operacji Delete.");
+        }
+        var rowData = Inputs.GetChild(0);
+        
+        permissionId = rowData.GetProperty("Permission Id"); // ID zwrotne z MAPI z operacji Insert
+        contactId = rowData.GetProperty("Contact Id"); 
+        
+        if (!permissionId || permissionId === "") {
+            ctx.app.RaiseErrorText("Brak identyfikatora uprawnienia (Permission Id) - usuniecie niemozliwe.");
+        }
+        if (!contactId || contactId === "") {
+            ctx.app.RaiseErrorText("Brak identyfikatora osoby kontaktowej (Contact Id)!");
+        }
+
+        // 2. LOGIKA KONTEKSTU (UI vs Not UI)
+        activeBO = ctx.app.ActiveBusObject();
+        if (activeBO !== null && activeBO.Name() === "Account") {
+            try {
+                bcContact = activeBO.GetBusComp("Contact");
+                isUIContext = true;
+                fnLog("| UI Context\n", LOG_INFO_LVL);
+            } catch (e) {}
+        }
+
+        if (!isUIContext) {
+            fnLog("| Not UI Context\n", LOG_INFO_LVL);
+            initBoBc(ctx, [{
+                name: "Contact", alias: "ContactStandalone", isActive: false,
+                bcList: [{ name: "Contact", alias: "ContactBC" }]
+            }]);
+            
+            bcContact = ctx.bc.ContactBC;
+            bcContact.SetViewMode(AllView);
+            bcContact.ClearToQuery();
+            bcContact.ActivateField("TMO Profile Id");
+            bcContact.ActivateField("TMO Multiparty Company");
+            
+            bcContact.SetSearchSpec("Id", contactId);
+            bcContact.ExecuteQuery(ForwardOnly);
+            
+            if (!bcContact.FirstRecord()) {
+                ctx.app.RaiseErrorText("Nie znaleziono osoby kontaktowej w bazie.");
+            }
+        }
+
+        tmoProfileId = bcContact.GetFieldValue("TMO Profile Id");
+        multiPartyCompany = bcContact.GetFieldValue("TMO Multiparty Company");
+
+        fnLog("Contact Id: " + contactId, LOG_INFO_LVL);
+        fnLog("Profile Id: " + tmoProfileId, LOG_INFO_LVL);
+        fnLog("MultiCompany: " + multiPartyCompany, LOG_INFO_LVL);
+        fnLog("Permission Id: " + permissionId, LOG_INFO_LVL);
+
+        // 3. KROK I - PATCH /permissions (Dezaktywacja roli)
+        fnLog("--------------------------------------------------------\n", LOG_INFO_LVL);
+        fnLog("| PATCH /permissions                                   |\n", LOG_INFO_LVL);
+        fnLog("--------------------------------------------------------\n", LOG_INFO_LVL);
+        
+        // Budowanie zagnieżdżonej struktury dat i statusu
+        var date = Date.fromSystem(Clib.time());
+        var endDateTime = Clib.rsprintf("%04d-%02d-%02dT%02d:%02d:%02d.000Z",
+            date.getFullYear(), date.getMonth() + 1, date.getDate(),
+            date.getHours(), date.getMinutes(), date.getSeconds()
+        );
+
+        ctx.ps.requestPS = ctx.app.NewPropertySet();
+        ctx.ps.requestPS.SetType("Request");
+        ctx.ps.requestPS.SetProperty("status", "inactive");
+
+        ctx.ps.validForPS = ctx.app.NewPropertySet();
+        ctx.ps.validForPS.SetType("validFor");
+
+        ctx.ps.endDateTimePS = ctx.app.NewPropertySet();
+        ctx.ps.endDateTimePS.SetType("endDateTime");
+        ctx.ps.endDateTimePS.SetValue(endDateTime);
+
+        ctx.ps.validForPS.AddChild(ctx.ps.endDateTimePS);
+        ctx.ps.requestPS.AddChild(ctx.ps.validForPS);
+
+        ctx.ps.psPatchIn = ctx.app.NewPropertySet();
+        ctx.ps.psPatchOut = ctx.app.NewPropertySet();
+        
+        propertySetter(ctx.ps.psPatchIn, [
+            { name: "ProcessName", value: "TMO permissionsUpdate MAPI" },
+            { name: "Input_Id", value: permissionId }
+        ]);
+        
+        // Podpięcie złożonej struktury jako wejście do Workflow
+        ctx.ps.psPatchIn.AddChild(ctx.ps.requestPS);
+
+        ctx.bs.workflowProcessManager.InvokeMethod("RunProcess", ctx.ps.psPatchIn, ctx.ps.psPatchOut);
+
+        // 4. KROK II - GET /permissions (Sprawdzanie, czy to była ostatnia rola)
+        fnLog("--------------------------------------------------------\n", LOG_INFO_LVL);
+        fnLog("| GET /permissions - check if deleted role was last    |\n", LOG_INFO_LVL);
+        fnLog("--------------------------------------------------------\n", LOG_INFO_LVL);
+
+        ctx.ps.psGetIn = ctx.app.NewPropertySet();
+        ctx.ps.psGetOut = ctx.app.NewPropertySet();
+        
+        propertySetter(ctx.ps.psGetIn, [
+            { name: "ProcessName", value: "TMO permissions MAPI" },
+            { name: "Input_TMOSSOID", value: tmoProfileId },
+            { name: "Input_AccountIntegrationId", value: multiPartyCompany },
+            { name: "Input_Fields", value: "assetRoles.role.id" }
+        ]);
+        
+        ctx.bs.workflowProcessManager.InvokeMethod("RunProcess", ctx.ps.psGetIn, ctx.ps.psGetOut);
+
+        // Używamy naszego inteligentnego skanera
+        var listRespBody = getDeepChild(ctx.ps.psGetOut, ["RespBody", "ListOfRespBody"]);
+
+        // 5. KROK III - DELETE (Wyczyszczenie profilu z firmy, jeśli ról brak)
+        if (listRespBody === null || typeof listRespBody.GetChildCount !== "function" || listRespBody.GetChildCount() === 0) {
+            fnLog("--------------------------------------------------------\n", LOG_INFO_LVL);
+            fnLog("| DELETE /permissions/profile_id/adminCompany          |\n", LOG_INFO_LVL);
+            fnLog("| No roles found for profile. Removing adminCompany... |\n", LOG_INFO_LVL);
+            fnLog("--------------------------------------------------------\n", LOG_INFO_LVL);
+            
+            ctx.ps.psDelIn = ctx.app.NewPropertySet();
+            ctx.ps.psDelOut = ctx.app.NewPropertySet();
+            
+            propertySetter(ctx.ps.psDelIn, [
+                { name: "ProcessName", value: "TMO profileManagementDelete MAPI" },
+                { name: "Input_Contact_SSO_Id", value: tmoProfileId },
+                { name: "Input_Contat_Integration_Id", value: multiPartyCompany }
+            ]);
+
+            ctx.bs.workflowProcessManager.InvokeMethod("RunProcess", ctx.ps.psDelIn, ctx.ps.psDelOut);
+
+            // Odpinamy firmę w Siebelu!
+            bcContact.SetFieldValue("TMO Multiparty Company", "");
+            bcContact.WriteRecord();
+            
+            fnLog("| adminCompany removed and Contact BC updated.\n", LOG_INFO_LVL);
+        } else {
+            fnLog("| Roles still exist for profile. adminCompany will not be removed.\n", LOG_INFO_LVL);
+        }
+
+        Outputs.SetProperty("Status", "Success");
+
+    } catch (e) {
+        fnLog("ERROR in Delete: " + e.toString(), LOG_INFO_LVL);
+        throw (e);
+    } finally {
+        bcContact = null;
+        activeBO = null;
+        cleanup(ctx);
+        
+        fnLog("========================================================\n", LOG_INFO_LVL);
+        fnLog("| DELETE MANAGED BILLING PROFILE - STOP                |\n", LOG_INFO_LVL);
+        fnLog("========================================================\n", LOG_INFO_LVL);
+        
+        return (CancelOperation);
+    }
+}
+
+// ==============================================================================
+// FUNKCJE POMOCNICZE (Helper Functions)
+// ==============================================================================
+
+function initBs(ctx, bsList) {
+    for (var i = 0; i < bsList.length; i++) {
+        var alias = bsList[i].alias || bsList[i].name;
+        ctx.bs[alias] = ctx.app.GetService(bsList[i].name);
+    }
+}
+
+function initBoBc(ctx, boList) {
+    for (var i = 0; i < boList.length; i++) {
+        var boDef = boList[i];
+        var boAlias = boDef.alias || boDef.name;
+        
+        if (boDef.isActive) {
+            ctx.bo[boAlias] = ctx.app.ActiveBusObject();
+            if (ctx.bo[boAlias] === null) throw new Error("Brak aktywnego BO: " + boDef.name);
+        } else {
+            ctx.bo[boAlias] = ctx.app.GetBusObject(boDef.name);
+        }
+        
+        if (boDef.bcList) {
+            for (var j = 0; j < boDef.bcList.length; j++) {
+                var bcDef = boDef.bcList[j];
+                var bcAlias = bcDef.alias || bcDef.name;
+                ctx.bc[bcAlias] = ctx.bo[boAlias].GetBusComp(bcDef.name);
+            }
+        }
+    }
+}
+
+function propertySetter(propSet, properties) {
+    if (!propSet || !properties) return;
     for (var i = 0; i < properties.length; i++) {
-        var pair = properties[i].split("=");
-        if (pair.length === 2) {
-            ps.SetProperty(pair[0].trim(), pair[1].trim());
+        var val = properties[i].value;
+        var safeValue = (val !== null && val !== undefined) ? val.toString() : "";
+        propSet.SetProperty(properties[i].name, safeValue);
+    }
+}
+
+function getDeepChild(ps, path) {
+    var current = ps;
+    for (var i = 0; i < path.length; i++) {
+        if (!current || typeof current.GetChildCount !== "function") return null;
+        var step = path[i];
+        if (typeof step === "number") {
+            if (step >= current.GetChildCount()) return null;
+            current = current.GetChild(step);
+        } else if (typeof step === "string") {
+            var found = false;
+            for (var j = 0; j < current.GetChildCount(); j++) {
+                if (current.GetChild(j).GetType() === step) {
+                    current = current.GetChild(j);
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) return null;
         }
     }
-};
+    return current;
+}
 
-// Pobiera wartość właściwości dla danego PropertySet
-PropertySetBuilder.prototype.getProperty = function(name, key) {
-    var ps = this.propertySets[name];
-    return ps ? ps.GetProperty(key) : null;
-};
+function cleanup(ctx) {
+    if (!ctx) return;
+    if (ctx.ps) { for (var psKey in ctx.ps) { ctx.ps[psKey] = null; } }
+    if (ctx.bc) { for (var bcKey in ctx.bc) { ctx.bc[bcKey] = null; } }
+    if (ctx.bo) { for (var boKey in ctx.bo) { ctx.bo[boKey] = null; } }
+    if (ctx.bs) { for (var bsKey in ctx.bs) { ctx.bs[bsKey] = null; } }
+    ctx.app = null;
+}
 
-// Pobiera wszystkie właściwości jako obiekt
-PropertySetBuilder.prototype.getAllProperties = function(name) {
-    var ps = this.propertySets[name];
-    if (!ps) return null;
+// ==============================================================================
+// LOGIKA BIZNESOWA APLETU
+// ==============================================================================
 
-    var properties = {};
-    var propNames = ps.GetPropertyNames().split(",");
-    for (var i = 0; i < propNames.length; i++) {
-        var propName = propNames[i].trim();
-        if (propName) {
-            properties[propName] = ps.GetProperty(propName);
+function getSearchSpec(ctx) {
+    var profileId = "";
+    var accountIntegrationId = "";
+    var searchSpec = "";
+    
+    try {
+        var activeBO = ctx.app.ActiveBusObject();
+        if (activeBO !== null && activeBO.Name() === "Account") {
+            var bcContact = activeBO.GetBusComp("Contact");
+            profileId = bcContact.GetFieldValue("TMO Profile Id");
+            accountIntegrationId = bcContact.GetFieldValue("TMO Multiparty Company"); // Spójne z nowym podejściem
         }
-    }
-    return properties;
-};
 
-// Tworzy strukturę PropertySet na podstawie Inputs
-PropertySetBuilder.prototype.buildFromInputs = function(inputs) {
-    var propNames = inputs.GetPropertyNames().split(",");
-    for (var i = 0; i < propNames.length; i++) {
-        var name = propNames[i].trim();
-        if (name) {
-            var props = inputs.GetProperty(name);
-            var parentMatch = props.match(/Parent=([^;]+)/);
-            var parent = parentMatch ? parentMatch[1].trim() : "Root";
-            this.addChild(name, parent);
-            this.setProperties(name, props);
+        // Jeśli brak profilu, po prostu zwracamy puste filtry
+        if (!profileId || profileId === "" || !accountIntegrationId || accountIntegrationId === "") {
+            return searchSpec;
         }
+
+        ctx.ps.psWpmIn = ctx.app.NewPropertySet();
+        ctx.ps.psWpmOut = ctx.app.NewPropertySet();
+
+        propertySetter(ctx.ps.psWpmIn, [
+            { name: "ProcessName", value: "TMO permissions MAPI" },
+            { name: "Input_AccountIntegrationId", value: accountIntegrationId },
+            { name: "Input_TMOSSOID", value: profileId },
+            { name: "Input_Query", value: "contains(assetRoles,and(eq(manageableAsset.entityType,BillingAccount),eq(role.entityType,technicalRole)))" },
+            { name: "Input_Fields", value: "assetRoles.manageableAsset.id" }
+        ]);
+
+        ctx.bs.workflowProcessManager.InvokeMethod("RunProcess", ctx.ps.psWpmIn, ctx.ps.psWpmOut);
+
+        var listRespBody = getDeepChild(ctx.ps.psWpmOut, ["RespBody", "ListOfRespBody"]);
+        if (listRespBody !== null) {
+            for (var i = 0; i < listRespBody.GetChildCount(); i++) {
+                // Bezpieczne pobieranie ID z zagnieżdżonej struktury MAPI
+                var manageableAsset = getDeepChild(listRespBody, [i, "ListOfassetRoles", "assetRoles", "ListOfmanageableAsset", "manageableAsset"]);
+                if (manageableAsset) {
+                    var bpId = manageableAsset.GetProperty("id");
+                    if (bpId !== "") {
+                        searchSpec += " AND [Name] <> '" + bpId + "'";
+                    }
+                }
+            }
+        }
+        
+        return searchSpec;
+
+    } catch (e) {
+        TheApplication().Trace("Błąd w getSearchSpec na aplecie PopUp: " + e.toString());
+        return ""; // W razie błędu API nie blokujemy okienka
     }
-};
+}
 
-// Pobiera PropertySet po nazwie
-PropertySetBuilder.prototype.getPropertySet = function(name) {
-    return this.propertySets[name] || null;
-};
+function PickRecord(ctx, applet) {
+    ctx.ps.navIn = ctx.app.NewPropertySet();
+    ctx.ps.navOut = ctx.app.NewPropertySet();
 
-// Pobiera główny PropertySet (root)
-PropertySetBuilder.prototype.get = function() {
-    return this.root;
-};
+    applet.BusComp().ActivateField("Name");
+    var billingProfileNumber = applet.BusComp().GetFieldValue("Name");
+
+    try {
+        // Bez zbędnej pętli - próbujemy wstawić rekord i delegujemy walidację do funkcji Insert w VBC
+        ctx.bc.BillingProfilesVbc.NewRecord(NewAfter);
+        ctx.bc.BillingProfilesVbc.SetFieldValue("Billing Profile Number", billingProfileNumber);
+        
+        // Zapis rekordu. W przypadku duplikatu, wywali błąd skonfigurowany w Insert
+        ctx.bc.BillingProfilesVbc.WriteRecord();
+
+    } catch (e) {
+        // Wycofujemy zepsuty rekord, żeby VBC wróciło do normy
+        ctx.bc.BillingProfilesVbc.UndoRecord();
+        throw (e);
+    }
+
+    applet.InvokeMethod("CloseApplet");
+
+    // Odświeżenie apletu docelowego (aby VBC pobrało nowe dane)
+    ctx.ps.navIn.SetProperty("Refresh All", "Y");
+    ctx.bs.finsTellerUiNavigation.InvokeMethod("RefreshCurrentApplet", ctx.ps.navIn, ctx.ps.navOut);
+}
+
+// ==============================================================================
+// GŁÓWNE ZDARZENIA APLETU (EVENTS)
+// ==============================================================================
+
+function WebApplet_PreInvokeMethod(MethodName) {
+    
+    // 1. OBSŁUGA FILTROWANIA ZDUPLIKOWANYCH PROFILI (Zanim wykona się zapytanie)
+    if (MethodName === "ExecuteQuery" || MethodName === "Find") {
+        var ctxQ = { app: TheApplication(), bo: {}, bc: {}, ps: {}, bs: {} };
+        try {
+            initBs(ctxQ, [{ name: "Workflow Process Manager", alias: "workflowProcessManager" }]);
+
+            var searchSpecREST = getSearchSpec(ctxQ);
+            
+            if (searchSpecREST !== "") {
+                var currentExpr = this.BusComp().GetSearchExpr() || "";
+                var finalExpr = "";
+                
+                // Jeśli standardowy searchExpr jest pusty, wycinamy pierwsze ' AND '
+                if (currentExpr === "") {
+                    finalExpr = searchSpecREST.replace(/^\s*AND\s*/i, "");
+                } else {
+                    finalExpr = currentExpr + searchSpecREST;
+                }
+                
+                this.BusComp().SetSearchExpr(finalExpr);
+            }
+        } catch (e) {
+            TheApplication().Trace("Błąd przed ExecuteQuery: " + e.toString());
+        } finally {
+            cleanup(ctxQ);
+        }
+        
+        // Zwracamy Continue, żeby Siebel sam naturalnie uruchomił query z naszym nowym filtrem!
+        return (ContinueOperation);
+    }
+
+    // 2. OBSŁUGA WYBORU REKORDU I ZAPISU (Zastępuje standardową akcję)
+    if (MethodName === "PickRecord") {
+        var ctxP = { app: TheApplication(), bo: {}, bc: {}, ps: {}, bs: {} };
+        try {
+            initBoBc(ctxP, [{
+                name: "Account", isActive: true,
+                bcList: [{ name: "TMO Contact Managed BP VBC", alias: "BillingProfilesVbc" }]
+            }]);
+            initBs(ctxP, [{ name: "FINS Teller UI Navigation", alias: "finsTellerUiNavigation" }]);
+
+            PickRecord(ctxP, this);
+            
+        } catch (e) {
+            // Bezpieczne przechwycenie błędu z VBC i wyświetlenie okienka z ostrzeżeniem na UI
+            TheApplication().RaiseErrorText(e.errText || e.toString());
+        } finally {
+            cleanup(ctxP);
+        }
+        
+        return (CancelOperation); // Siebel nie musi już nic robić, sami zamknęliśmy aplet
+    }
+
+    return (ContinueOperation);
+}
