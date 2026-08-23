@@ -1,3 +1,206 @@
+function Query(Inputs, Outputs) {
+    var ctx = {
+        app: TheApplication(),
+        bs: {}, bo: {}, bc: {}, ps: {}
+    };
+
+    initBs(ctx, [{ name: "Workflow Process Manager", alias: "workflowProcessManager" }]);
+    // Inicjalizacja dla Account zostawiona tak jak miałeś na obrazku
+    initBoBc(ctx, [{
+        name: "Account", alias: "BillingQuery", isActive: false,
+        bcList: [{ name: "Com Invoice Profile", alias: "BillingProfile" }]
+    }]);
+
+    var searchString = Inputs.GetProperty("search-string");
+    fnLog("searchString: " + searchString);
+
+    // 1. ZBIERANIE CONTACT IDs Z ZAPYTANIA
+    var contactIds = [];
+    var uniqueIds = {};
+    if (searchString) {
+        var regexContact = /\[Contact Id\]\s*(?:=|LIKE)\s*'?([^']+)'?/gi;
+        var matchContact;
+        while ((matchContact = regexContact.exec(searchString)) !== null) {
+            var id = matchContact[1];
+            if (!uniqueIds[id]) {
+                uniqueIds[id] = true;
+                contactIds.push(id);
+            }
+        }
+    }
+
+    // 2. TWORZENIE ELEMENTÓW DO FILTROWANIA PO NUMERZE BILINGU
+    ctx.ps.customQueryElements = ctx.app.NewPropertySet();
+    if (searchString) {
+        var fieldName = "Billing Profile Number";
+        var regexBP = new RegExp("\\[" + fieldName + "\\]\\s*(?:=|LIKE)\\s*'?([^']+)'?", "gi");
+        var matchBP;
+        while ((matchBP = regexBP.exec(searchString)) !== null) {
+            var sBillProfNumber = matchBP[1].replace(/\*/g, ""); 
+            ctx.ps.customQueryElements.SetProperty(sBillProfNumber, sBillProfNumber);
+        }
+    }
+
+    var isUIContext = false;
+    var activeBO = ctx.app.ActiveBusObject();
+    var bcContact = null;
+    var currentContactId = "";
+
+    // 3. OBSŁUGA KONTEKSTU (Jeśli nie ma ID w zapytaniu, szukamy w aktywnym oknie)
+    if (contactIds.length === 0) {
+        if (activeBO !== null && activeBO.Name() === "Account") {
+            try {
+                bcContact = activeBO.GetBusComp("Contact");
+                currentContactId = bcContact.GetFieldValue("Id");
+                if (currentContactId) {
+                    contactIds.push(currentContactId);
+                    isUIContext = true;
+                }
+            } catch (e) {
+                // ignorujemy błąd pobrania BC
+            }
+        }
+    }
+
+    // Jeśli nadal brak jakichkolwiek ID, kończymy
+    if (contactIds.length === 0) {
+        fnLog("Brak Contact Id do przetworzenia.");
+        return (CancelOperation);
+    }
+
+    // 4. INICJALIZACJA STANDALONE BC (Gdy zapytanie idzie z tła dla wielu ID)
+    if (!isUIContext) {
+        initBoBc(ctx, [{
+            name: "Contact", alias: "ContactStandalone", isActive: false,
+            bcList: [{ name: "Contact", alias: "ContactBC" }]
+        }]);
+        bcContact = ctx.bc.ContactBC;
+        bcContact.SetViewMode(AllView);
+    }
+
+    // MAPY DLA CACHE'A SŁOWNIKA
+    var billingProfilesCache = {}; 
+    var loadedAccounts = {};       
+
+    try {
+        fnLog("JESTEM W TRY");
+
+        // 5. GŁÓWNA PĘTLA PRZEZ WSZYSTKIE CONTACT IDs
+        for (var k = 0; k < contactIds.length; k++) {
+            currentContactId = contactIds[k];
+            fnLog("currentContactId: " + currentContactId);
+
+            var profileId = "";
+            var multiPartyCompany = "";
+            var accountId = "";
+
+            // Jeśli pętla idzie po wielu ID, musimy użyć samodzielnego BC
+            if (!isUIContext) {
+                bcContact.ClearToQuery();
+                bcContact.ActivateField("TMO Profile Id");
+                bcContact.ActivateField("TMO Multiparty Company");
+                bcContact.ActivateField("Account Id");
+
+                bcContact.SetSearchSpec("Id", currentContactId);
+                bcContact.ExecuteQuery(ForwardOnly);
+
+                if (bcContact.FirstRecord()) {
+                    profileId = bcContact.GetFieldValue("TMO Profile Id");
+                    multiPartyCompany = bcContact.GetFieldValue("TMO Multiparty Company");
+                    accountId = bcContact.GetFieldValue("Account Id");
+                }
+            } else {
+                // Kontekst UI (jeden aktywny rekord)
+                profileId = bcContact.GetFieldValue("TMO Profile Id");
+                multiPartyCompany = bcContact.GetFieldValue("TMO Multiparty Company");
+                accountId = bcContact.GetFieldValue("Account Id");
+            }
+
+            fnLog("profileId: " + profileId);
+            fnLog("multiPartyCompany: " + multiPartyCompany);
+            fnLog("accountId: " + accountId);
+
+            if (profileId !== "" && multiPartyCompany !== "") {
+                
+                // --- INTELIGENTNY CACHE SŁOWNIKA ---
+                // Ładujemy dane dla danego accountId tylko RAZ w całej pętli
+                if (!loadedAccounts[accountId]) {
+                    fnLog("Laduje slownik bilingow na zywo z bazy dla Account Id: " + accountId);
+                    var freshProfiles = loadBillingProfiles(ctx, accountId);
+                    for (var key in freshProfiles) {
+                        billingProfilesCache[key] = freshProfiles[key];
+                    }
+                    loadedAccounts[accountId] = true; // Flaga, że już załadowane
+                }
+
+                ctx.ps.workflowProcessManagerInput = ctx.app.NewPropertySet();
+                ctx.ps.workflowProcessManagerOutput = ctx.app.NewPropertySet();
+
+                propertySetter(ctx.ps.workflowProcessManagerInput, [
+                    { name: "Input_AccountIntegrationId", value: multiPartyCompany },
+                    { name: "Input_TMOSSOID", value: profileId },
+                    { name: "Input_Query", value: "contains(assetRoles,and(eq(manageableAsset.entityType,BillingAccount),eq(role.entityType,technicalRole)))" },
+                    { name: "Input_Fields", value: "assetRoles.manageableAsset.id" },
+                    { name: "ProcessName", value: "TMO permissions MAPI" }
+                ]);
+
+                ctx.bs.workflowProcessManager.InvokeMethod("RunProcess", ctx.ps.workflowProcessManagerInput, ctx.ps.workflowProcessManagerOutput);
+                fnLog("GET /permissions wywolane pomyslnie");
+
+                if (ctx.ps.workflowProcessManagerOutput.GetProperty("IntoObjectNameResponse") === "Res105RolesandPermissionsAPI:res") {
+                    
+                    // Zaktualizowana pomyślnie ścieżka do głębokiej struktury
+                    ctx.ps.psListOfRespBody = getDeepChild(ctx.ps.workflowProcessManagerOutput, ["RestResponse", "ListOfRes105RolesandPermissionsAPI:res", "Resp200", "ListOfRespBody"]);
+
+                    if (ctx.ps.psListOfRespBody !== null) {
+                        for (var i = 0; i < ctx.ps.psListOfRespBody.GetChildCount(); i++) {
+                            
+                            var manageableAsset = getDeepChild(ctx.ps.psListOfRespBody, [i, "ListOfassetRoles", "assetRoles", "ListOfmanageableAsset", "manageableAsset"]);
+                            // Bezpieczne sprawdzanie ID bez użycia niebezpiecznego ||
+                            var bpId = (manageableAsset !== null) ? manageableAsset.GetProperty("id") : "";
+
+                            if (bpId !== "") {
+                                // Odczyt z nowo zbudowanego globalnego cache'a
+                                var bpStatus = billingProfilesCache[bpId] ? billingProfilesCache[bpId].status : "";
+                                var bpRecipientName = billingProfilesCache[bpId] ? billingProfilesCache[bpId].recipientName : "";
+
+                                fnLog("Billing Profile Number: " + bpId);
+                                fnLog("Billing Profile Status: " + bpStatus);
+
+                                var row = ctx.app.NewPropertySet();
+                                propertySetter(row, [
+                                    { name: "Account Id", value: multiPartyCompany },
+                                    { name: "Billing Profile Number", value: bpId },
+                                    { name: "Permission Id", value: ctx.ps.psListOfRespBody.GetChild(i).GetProperty("id") },
+                                    { name: "Contact Id", value: currentContactId },
+                                    { name: "Billing Profile Status", value: bpStatus },
+                                    { name: "Billing Profile Reciepent Name", value: bpRecipientName }
+                                ]);
+
+                                // Magia filtrowania w VBC: Jeśli filtr jest pusty LUB znaleziono zgodny numer bilingu - dodaj do wyników
+                                if (ctx.ps.customQueryElements.GetFirstProperty() === "" || ctx.ps.customQueryElements.GetProperty(row.GetProperty("Billing Profile Number")) !== "") {
+                                    Outputs.AddChild(row);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } // Zakończenie głównej pętli dla wszystkich ID
+
+    } catch (e) {
+        var sErrorMsg = (e.errText) ? e.errText : e.toString();
+        fnLog("ERROR: " + sErrorMsg);
+        throw e;
+    } finally {
+        bcContact = null;
+        activeBO = null;
+        cleanup(ctx);
+    }
+
+    return (CancelOperation);
+}
+
 function loadBillingProfiles(ctx, accountId) {
     var bcBP = null;
     var localProfilesMap = {}; // Lokalny kontener na dane
