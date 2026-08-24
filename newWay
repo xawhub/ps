@@ -1,151 +1,169 @@
-// Pełny kod Business Service do zarządzania PropertySetami
+function OnePortalAccessSync(ctx, bcContact) {
+    // Inicjujemy obiekt zwrotny (zgodnie ze standardem, jakiego oczekiwały Twoje skrypty)
+    var result = {
+        profileId: "",
+        multipartyCompany: ""
+    };
 
-function Service_PreInvokeMethod(MethodName, Inputs, Outputs) {
-    if (MethodName === "AddOrUpdateRecords") {
-        AddOrUpdateRecords(Inputs, Outputs);
-        return CancelOperation;
-    } else if (MethodName === "TestPerformance") {
-        TestPerformance(Inputs, Outputs);
-        return CancelOperation;
-    } else if (MethodName === "GetValueFromPath") {
-        GetValueFromPath(Inputs, Outputs);
-        return CancelOperation;
-    } else if (MethodName === "GetRecordsFromPath") {
-        GetRecordsFromPath(Inputs, Outputs);
-        return CancelOperation;
-    } else if (MethodName === "RemoveRecord") {
-        RemoveRecord(Inputs, Outputs);
-        return CancelOperation;
-    } else if (MethodName === "RemoveLevel") {
-        RemoveLevel(Inputs, Outputs);
-        return CancelOperation;
-    } else if (MethodName === "AddMultipleRecords") {
-        AddMultipleRecords(Inputs, Outputs);
-        return CancelOperation;
-    }
-    return ContinueOperation;
-}
+    var psRestBody = null;
+    var psRelatedParties = null;
+    var sProfileId = "";
+    var sAccountContactIntegrationIdFromProfile = "";
 
-function NavigateToPath(root, path, createIfNotExist) {
-    var parts = path.split("/");
-    var current = root;
-    for (var i = 0; i < parts.length; i++) {
-        var found = false;
-        for (var j = 0; j < current.GetChildCount(); j++) {
-            var child = current.GetChild(j);
-            if (child.GetType() === parts[i]) {
-                current = child;
-                found = true;
-                break;
+    try {
+        fnLog("--------------------------------------------------");
+        fnLog("| SYNC ONE PORTAL PROFILE - START                |");
+        fnLog("--------------------------------------------------");
+
+        if (!bcContact) {
+            throw new Error("Funkcja SyncOnePortalProfile wymaga przekazania aktywnego bcContact!");
+        }
+
+        // Zbieramy dane z Kontaktu do lokalnych zmiennych
+        var accountIntId = bcContact.GetFieldValue("Account Integration Id");
+        var ssoLogin     = bcContact.GetFieldValue("TMO SSO Login");
+        var contactId    = bcContact.GetFieldValue("Id");
+        var otpMsisdn    = bcContact.GetFieldValue("TMO OTP MSISDN");
+        var firstName    = bcContact.GetFieldValue("First Name");
+        var lastName     = bcContact.GetFieldValue("Last Name");
+        var loginMethod  = bcContact.GetFieldValue("TMO Login Method");
+
+        fnLog("accountIntId : " + accountIntId);
+        fnLog("ssoLogin : " + ssoLogin);
+        fnLog("contactId : " + contactId);
+        fnLog("otpMsisdn : " + otpMsisdn);
+        fnLog("firstName : " + firstName);
+        fnLog("lastName : " + lastName);
+        fnLog("loginMethod : " + loginMethod);
+
+        // 1. GET PROFILE - Sprawdzamy czy profil istnieje
+        ctx.ps.psWpmSyncIn = ctx.app.NewPropertySet();
+        ctx.ps.psWpmSyncOut = ctx.app.NewPropertySet();
+
+        propertySetter(ctx.ps.psWpmSyncIn, [
+            { name: "Input_Fields", value: "id,status,username,loginMethod,relatedParties" },
+            { name: "Input_Query", value: "eq(contactMediums.medium.emailAddress,'" + ssoLogin + "')" },
+            { name: "ProcessName", value: "TMO profileManagement MAPI" }
+        ]);
+
+        fnLog("| GET PROFILE...");
+        ctx.bs.workflowProcessManager.InvokeMethod("RunProcess", ctx.ps.psWpmSyncIn, ctx.ps.psWpmSyncOut);
+
+        // Pobieramy RespBody korzystając z długiej ścieżki potwierdzonej w logach (GET)
+        psRestBody = getDeepChild(ctx.ps.psWpmSyncOut, ["RestResponse", "ListOfRes15ProfileManagementAPI:res", "Resp200", "ListOfRespBody", "RespBody"]);
+
+        // --- SCENARIUSZ A: PROFIL ISTNIEJE ---
+        if (psRestBody !== null) {
+            fnLog("| Profile found! Przechodze do weryfikacji powiazan (PATCH)...");
+            
+            sProfileId = psRestBody.GetProperty("id");
+            psRelatedParties = psRestBody.GetChild(0); // ListOfrelatedParties
+            
+            if (psRelatedParties) {
+                for (var j = 0; j < psRelatedParties.GetChildCount(); j++) {
+                    var party = psRelatedParties.GetChild(j);
+                    if (party.GetProperty("entityReferredType") === "Customer" && party.GetProperty("role") === "adminCompany") {
+                        sAccountContactIntegrationIdFromProfile = party.GetProperty("id");
+                    }
+                }
+            }
+
+            if (sAccountContactIntegrationIdFromProfile === accountIntId) {
+                // 100% poprawności - wystarczy upewnić się, że Siebel ma to zapisane
+                fnLog("| Firma jest poprawnie przypisana. Aktualizuje BC...");
+                bcContact.SetFieldValue("TMO Profile Id", sProfileId);
+                bcContact.SetFieldValue("TMO Multiparty Company", sAccountContactIntegrationIdFromProfile);
+                bcContact.WriteRecord();
+            } else {
+                // PATCH - Brakuje powiązania profilu z konkretną firmą
+                fnLog("| PATCH PROFILE - Add Related Parties...");
+                ctx.ps.psWpmPatchIn = ctx.app.NewPropertySet();
+                ctx.ps.psWpmPatchOut = ctx.app.NewPropertySet();
+
+                propertySetter(ctx.ps.psWpmPatchIn, [
+                    { name: "Account Integration Id", value: accountIntId },
+                    { name: "Entity Referred Type", value: "Customer" },
+                    { name: "Role", value: "adminCompany" },
+                    { name: "Profile Id", value: sProfileId },
+                    { name: "Input Integration Object", value: "Req6ProfileManagementAPI:body" },
+                    { name: "ProcessName", value: "TMO profileManagementAddRelParties MAPI" }
+                ]);
+
+                ctx.bs.workflowProcessManager.InvokeMethod("RunProcess", ctx.ps.psWpmPatchIn, ctx.ps.psWpmPatchOut);
+
+                if (ctx.ps.psWpmPatchOut.GetProperty("Error Code") !== "") {
+                    ctx.app.RaiseErrorText("Blad synchronizacji (PATCH). Brak mozliwosci przypisania firmy do istniejacego profilu.");
+                } else {
+                    sAccountContactIntegrationIdFromProfile = accountIntId;
+                    bcContact.SetFieldValue("TMO Profile Id", sProfileId);
+                    bcContact.SetFieldValue("TMO Multiparty Company", accountIntId);
+                    bcContact.WriteRecord();
+                }
+            }
+        } 
+        // --- SCENARIUSZ B: PROFIL NIE ISTNIEJE (Tworzymy - POST) ---
+        else {
+            fnLog("| Profile not found! Odpalam POST /profiles (CREATE)...");
+            
+            ctx.ps.psWpmPostIn = ctx.app.NewPropertySet();
+            ctx.ps.psWpmPostOut = ctx.app.NewPropertySet();
+
+            var convertedLoginMethod = convertLICLangToHAL(ctx, loginMethod);
+
+            propertySetter(ctx.ps.psWpmPostIn, [
+                { name: "Input_ACCOUNT_INT_ID", value: accountIntId },
+                { name: "Input_CONTACT_INT_ID", value: contactId },
+                { name: "Input_CONTACT_LOGIN_SSO", value: ssoLogin },
+                { name: "Input_CONTACT_OTP_MSISDN", value: otpMsisdn },
+                { name: "Input_CONTACT_NAME", value: firstName },
+                { name: "Input_CONTACT_LASTNAME", value: lastName },
+                { name: "Input_CONTACT_LOGINMETHOD", value: convertedLoginMethod },
+                { name: "ProcessName", value: "TMO profileManagementCreate MAPI" }
+            ]);
+
+            ctx.bs.workflowProcessManager.InvokeMethod("RunProcess", ctx.ps.psWpmPostIn, ctx.ps.psWpmPostOut);
+
+            // Parsujemy wynik POST (Tutaj API odpowiada krótszą ścieżką - bez ListOfRes...)
+            var postRespBody = getDeepChild(ctx.ps.psWpmPostOut, ["RestResponse", "RespBody"]);
+
+            if (postRespBody !== null) {
+                sProfileId = postRespBody.GetProperty("id");
+                psRelatedParties = postRespBody.GetChild(0);
+
+                if (psRelatedParties) {
+                    for (var k = 0; k < psRelatedParties.GetChildCount(); k++) {
+                        var createdParty = psRelatedParties.GetChild(k);
+                        if (createdParty.GetProperty("entityReferredType") === "Customer" && createdParty.GetProperty("role") === "adminCompany") {
+                            sAccountContactIntegrationIdFromProfile = createdParty.GetProperty("id");
+                        }
+                    }
+                }
+
+                if (sAccountContactIntegrationIdFromProfile === accountIntId) {
+                    bcContact.SetFieldValue("TMO Profile Id", sProfileId);
+                    bcContact.SetFieldValue("TMO Multiparty Company", sAccountContactIntegrationIdFromProfile);
+                    bcContact.WriteRecord();
+                } else {
+                    ctx.app.RaiseErrorText("Niezgodnosc Account Integration Id zwroconego po procedurze POST.");
+                }
+            } else {
+                 ctx.app.RaiseErrorText("Blad zewnetrznego API podczas tworzenia Profilu Cyfrowego. Pusta odpowiedz.");
             }
         }
-        if (!found) {
-            if (!createIfNotExist) return null;
-            var newChild = TheApplication().NewPropertySet();
-            newChild.SetType(parts[i]);
-            current.AddChild(newChild);
-            current = newChild;
-        }
-    }
-    return current;
-}
 
-function AddOrUpdateRecords(inputs, outputs) {
-    var root = inputs.GetChild(0);
-    var recordType = inputs.GetProperty("RecordType");
-    var key = inputs.GetProperty("Key");
-    var value = inputs.GetProperty("Value");
-    var psTarget = NavigateToPath(root, recordType, true);
-    
-    var existingRecord = null;
-    for (var i = 0; i < psTarget.GetChildCount(); i++) {
-        var child = psTarget.GetChild(i);
-        if (child.GetProperty("Key") === key) {
-            existingRecord = child;
-            break;
-        }
-    }
-    
-    if (existingRecord) {
-        existingRecord.SetProperty("Value", value);
-    } else {
-        var newRecord = TheApplication().NewPropertySet();
-        newRecord.SetType("Record");
-        newRecord.SetProperty("Key", key);
-        newRecord.SetProperty("Value", value);
-        psTarget.AddChild(newRecord);
-    }
-    outputs.AddChild(root);
-}
+        // Zwracamy wyliczone zmienne dla obiektu VBC
+        result.profileId = sProfileId;
+        result.multipartyCompany = sAccountContactIntegrationIdFromProfile;
 
-function GetValueFromPath(inputs, outputs) {
-    var path = inputs.GetProperty("Path");
-    var psRoot = inputs.GetChild(0);
-    var psTarget = NavigateToPath(psRoot, path, false);
-    if (psTarget) {
-        outputs.SetProperty("Value", psTarget.GetValue());
+    } catch (e) {
+        var sErrorMsg = (e.errText) ? e.errText : e.toString();
+        fnLog("ERROR in SyncOnePortalProfile: " + sErrorMsg);
+        throw e;
+    } finally {
+        fnLog("--------------------------------------------------");
+        fnLog("| SYNC ONE PORTAL PROFILE - STOP                 |");
+        fnLog("--------------------------------------------------");
     }
-}
 
-function RemoveLevel(inputs, outputs) {
-    var path = inputs.GetProperty("Path");
-    var psRoot = inputs.GetChild(0);
-    var parentPath = path.substring(0, path.lastIndexOf("/"));
-    var psParent = NavigateToPath(psRoot, parentPath, false);
-    if (psParent) {
-        for (var i = 0; i < psParent.GetChildCount(); i++) {
-            if (psParent.GetChild(i).GetType() === path.split("/").pop()) {
-                psParent.RemoveChild(i);
-                break;
-            }
-        }
-    }
-    outputs.AddChild(psRoot);
-}
-
-function TestPerformance(inputs, outputs) {
-    var iterations = [10, 1000, 100000];
-    var app = TheApplication();
-    var fileService = app.GetService("FINS Data Export Service");
-    var psInputs = app.NewPropertySet();
-    var psOutputs = app.NewPropertySet();
-    var rootName = "TestRoot";
-    var recordPrefix = "Record";
-    
-    for (var i = 0; i < iterations.length; i++) {
-        var count = iterations[i];
-        var startTime = new Date().getTime();
-        
-        var rootPS = app.NewPropertySet();
-        rootPS.SetType(rootName);
-        
-        for (var j = 0; j < count; j++) {
-            var newRecord = app.NewPropertySet();
-            newRecord.SetType("Record");
-            newRecord.SetProperty("Key", recordPrefix + j);
-            newRecord.SetProperty("Value", "TestValue" + j);
-            rootPS.AddChild(newRecord);
-        }
-        
-        var endTime = new Date().getTime();
-        var elapsedTime = endTime - startTime;
-        
-        psInputs.SetProperty("FileName", "C:\\SiebelLog\\PerformanceTest.txt");
-        psInputs.SetProperty("Append", "true");
-        psInputs.SetProperty("Data", "Test Iterations: " + count + " Time: " + elapsedTime + "ms\n");
-        fileService.InvokeMethod("WriteToFile", psInputs, psOutputs);
-    }
-    outputs.SetProperty("Status", "Performance test completed");
-}
-
-// Przykładowe wywołanie testu
-function RunPerformanceTest() {
-    var app = TheApplication();
-    var bs = app.GetService("Property Set Manager");
-    var inputs = app.NewPropertySet();
-    var outputs = app.NewPropertySet();
-    
-    bs.InvokeMethod("TestPerformance", inputs, outputs);
-    var status = outputs.GetProperty("Status");
-    TheApplication().RaiseErrorText("Test Completed: " + status);
+    return result;
 }
