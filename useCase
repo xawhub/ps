@@ -1,105 +1,89 @@
-var boService = TheApplication().GetService("PropertySetService");
-var inputs = TheApplication().NewPropertySet();
-var outputs = TheApplication().NewPropertySet();
+# [KN-368] Spike: Low-Level Design – Extending Trading Status Datafix Kafka Events to Non-Live Merchants
 
-// Tworzenie struktury bez numeracji
-inputs.SetProperty("Child1", "Parent=Root;Name=First Child;ID=101");
-inputs.SetProperty("SubChild1", "Parent=Child1;Name=First SubChild;Level=2");
-inputs.SetProperty("Child2", "Parent=Root;Name=Second Child;ID=102");
-inputs.SetProperty("SubChild2", "Parent=Child2;Name=Second SubChild;Level=2");
+## 1. Overview & Objective
+Currently, the datafix mechanism that triggers Kafka events for merchant trading status updates processes only active (`LIVE`) merchants. The objective of this spike (**KN-368**) is to analyze the workflow **`WP Kafka Send Trading Status Datafix Update`** and its downstream components to identify all required changes for extending event generation to other trading statuses, such as `CLOSED`, `SUSPENDED`, etc.
 
-// Wywołanie Business Service
-boService.InvokeMethod("BuildPropertySet", inputs, outputs);
+---
 
-// Pobranie utworzonego PropertySeta
-var rootPropertySet = outputs.GetChild(0);
+## 2. End-to-End Technical Flow Analysis (Current State)
 
-// Pobranie właściwości konkretnego węzła
-inputs.Reset();
-outputs.Reset();
-inputs.SetProperty("Name", "Child1");
-inputs.SetProperty("Key", "Name");
-boService.InvokeMethod("GetProperty", inputs, outputs);
-var child1Name = outputs.GetProperty("Value");
-TheApplication().Trace("Nazwa Child1: " + child1Name);
+### 2.1. Workflow Process: `WP Kafka Send Trading Status Datafix Update`
+The workflow is configured on the Business Object **`WP Kafka Customer Roles Audit`** and executes the following steps:
 
-// Pobranie wszystkich właściwości dla "Parent1"
-inputs.Reset();
-outputs.Reset();
-inputs.SetProperty("Name", "Child1");
-boService.InvokeMethod("GetAllProperties", inputs, outputs);
-var allChild1Props = JSON.stringify(outputs);
-TheApplication().Trace("Właściwości Child1: " + allChild1Props);
+1. **`Store Audit Id`** (`Workflow Utilities.Echo`): Stores the incoming `Object Id` (which represents the `ROW_ID` of the audit record) into the `AuditId` process property.
+2. **`Query Audit Table`** (`PRM ANI Utility Service.QueryBusComp`): Queries the **`WP Customer Roles Audit`** Business Component using `"[Id] = '" + [&Object Id] + "'"`. It retrieves the **`Party Identifier`** (Merchant Account `ROW_ID`) and overwrites the `Object Id` process property with this value.
+3. **`Check Audit` / `Query Account` / `Check Account`**: Validates that the audit record and the corresponding Merchant Account exist in Siebel.
+4. **`Check Roles`** (`PRM ANI Utility Service.QueryBusComp`): Queries the **`WP EAI Customer Roles`** Business Component with the following Search Specification:
 
-// Modyfikacja właściwości "Child2"
-inputs.Reset();
-outputs.Reset();
-inputs.SetProperty("Name", "Child2");
-inputs.SetProperty("Properties", "Name=Updated Child2;Age=30");
-boService.InvokeMethod("SetProperty", inputs, outputs);
+       [Role Value] = LookupValue("WP_PARTY_ROLE_TYPE", "MERCHANT") 
+       AND [WP Role Type] = LookupValue("WP_PARTY_ROLE_STATUS_TYPE", "TRA") 
+       AND ([Valid To] IS NULL OR [Valid To] >= Today()) 
+       AND [Party Identifier] = '[&Object Id]'
 
-// Sprawdzenie zmian
-inputs.Reset();
-outputs.Reset();
-inputs.SetProperty("Name", "Child2");
-boService.InvokeMethod("GetAllProperties", inputs, outputs);
-var updatedChild2Props = JSON.stringify(outputs);
-TheApplication().Trace("Zaktualizowane właściwości Child2: " + updatedChild2Props);
+   * **Output:** Extracts the `Role Status LIC` field and stores it in the **`RoleStatus`** process property. *(Note: This step retrieves any valid Trading Status, not just `LIVE`).*
+5. **`Check Rule Live?`** (Decision Point): Evaluates the `RoleStatus` process property:
+   * **Branch `Live`:** Configured with condition `RoleStatus` -> `All Must Match (Ignore Case)` -> `LIVE`. Routes execution to `Prepare Rule Set Data`.
+   * **Default Branch:** Routes any status other than `LIVE` directly to the `End` step, bypassing Kafka event generation.
+6. **`Prepare Rule Set Data`** (`Workflow Utilities.Echo`): Constructs the `AccHier` hierarchy for the Rule Engine with the following properties:
+   * `Hier.CalledFromObject` = `"Workflow : WP Kafka Send Trading Status Datafix Update"`
+   * `Hier.Object Id` = `[&Object Id]`
+   * `Hier.SearchExpression` = `"[WP Account Thin.Id] = '" + [&Object Id] + "'"`
+   * `Hier.Request Type` = `"Account"`
+7. **`Call Rule Engine - Kafka`** (`WP Work Item Business Rules Service.ProcessBusinessRules_PS`): Invokes the generic Rule Engine using `InputRuleHier = AccHier` and `RuleSetName = "Siebel - Kafka Call"`.
+8. **`Update Audit Record`**: Updates the audit table record upon completion.
 
+---
 
+### 2.2. Rule Engine & Downstream Kafka Publishing
+1. **Rule Set `Siebel - Kafka Call`**: Because `Request Type = Account`, the engine matches **Rule 0: `Publish Customer Role Change Message Data Script`**.
+2. **Topic Verification**: Rule 0 queries `WP Technical Reference Parameter` with:
 
-function PerformanceTest() {
-    var testSizes = [10, 100, 1000, 10000, 100000, 1000000];
-    
-    for (var i = 0; i < testSizes.length; i++) {
-        var size = testSizes[i];
-        TheApplication().Trace("Test dla " + size + " rekordów:");
+       [Technical Reference] = 'Kafka_Topic_Details' AND [Active Flag] = 'Y' AND [Name] = 'MerchantPromotionEvent'
 
-        // Test: PropertySetBuilder
-        var start1 = new Date().getTime();
-        var builder = new PropertySetBuilder();
-        for (var j = 0; j < size; j++) {
-            var name = "Node" + j;
-            builder.addChild(name, "Root");
-            builder.setProperties(name, "Key1=Value" + j + ";Key2=Extra" + j);
-        }
-        var psBuilder = builder.get();
-        var end1 = new Date().getTime();
-        TheApplication().Trace("PropertySetBuilder: " + (end1 - start1) + " ms");
+3. **Asynchronous Invocation**: Rule 0 invokes **`WP Send Event Utilities.CallAsyncProcess`**, submitting an asynchronous server request to component **`WPKAFKAWfProcMgr`** to run workflow **`WP Send Event Wrapper`** with parameters:
+   * `OutputIntObjectName` = `WP MF Get PO Config IO`
+   * `IOSearchSpec` = `[Party.Id] = '[&Object Id]'`
+   * `EventName` = `MerchantPromotedEventDbScript`
+   * `RemoveSpaces` = `true`
+4. **Payload Generation (`WP Send Event Wrapper` -> `WPKafkaPublish.SendKafkaEvent`)**: Queries the Integration Object **`WP MF Get PO Config IO`**. The child Integration Component **`Customer Roles`** (based on BC **`WP MF Customer Role Auto Loader`**) has no status-restricting search specifications and outputs `Id`, `RoleStatus`, `RoleValue`, `RoleType`, `ValidFrom`, and `ValidTo` directly into the JSON payload.
 
-        // Test: Standardowe PropertySety
-        var start2 = new Date().getTime();
-        var rootPs = TheApplication().NewPropertySet();
-        rootPs.SetType("Root");
-        for (var k = 0; k < size; k++) {
-            var child = TheApplication().NewPropertySet();
-            child.SetType("Node" + k);
-            child.SetProperty("Key1", "Value" + k);
-            child.SetProperty("Key2", "Extra" + k);
-            rootPs.AddChild(child);
-        }
-        var end2 = new Date().getTime();
-        TheApplication().Trace("Standard PropertySet: " + (end2 - start2) + " ms");
+---
 
-        // Pobieranie danych: PropertySetBuilder
-        var start3 = new Date().getTime();
-        var value1 = builder.getProperty("Node" + (size - 1), "Key1");
-        var end3 = new Date().getTime();
-        TheApplication().Trace("Pobranie PropertySetBuilder: " + (end3 - start3) + " ms");
+## 3. Impact Assessment & Required Changes
 
-        // Pobieranie danych: Standard PropertySet
-        var start4 = new Date().getTime();
-        var nodeFound = null;
-        for (var c = 0; c < rootPs.GetChildCount(); c++) {
-            var childNode = rootPs.GetChild(c);
-            if (childNode.GetType() === "Node" + (size - 1)) {
-                nodeFound = childNode.GetProperty("Key1");
-                break;
-            }
-        }
-        var end4 = new Date().getTime();
-        TheApplication().Trace("Pobranie Standard PropertySet: " + (end4 - start4) + " ms");
+| # | Component / Object | Object Type | Current Behavior | Required Modification |
+| :--- | :--- | :--- | :--- | :--- |
+| **1** | **External Data Script** | SQL / Batch Script | Populates `WP Customer Roles Audit` / triggers the workflow for `LIVE` merchants only. | Update the script's filtering criteria (`WHERE` clause) to include `CLOSED`, `SUSPENDED`, and other target trading statuses. |
+| **2** | **`WP Kafka Send Trading Status Datafix Update`** (Step: `Check Rule Live?` -> Branch: `Live`) | Workflow Process (Siebel Tools) | Condition checks `RoleStatus` with operation `All Must Match (Ignore Case)` = `LIVE`. | 1. Change **Operation** from `All Must Match (Ignore Case)` to **`One Must Match (Ignore Case)`**.<br>2. Add target status LIC values (`CLOSED`, `SUSPENDED`, etc.) to the **Values** list alongside `LIVE`. |
+| **3** | **`WP Kafka Send Trading Status Datafix Update`** (Step: `Check Roles`) | Workflow Process (Siebel Tools) | Queries `WP EAI Customer Roles` with `([Valid To] IS NULL OR [Valid To] >= Today())`. | **Conditional (Pending Confirmation):** If `CLOSED` merchants have a past `Valid To` date on their Trading Status record, remove or adjust the `Valid To` condition in the `Search Spec` so closed records are not filtered out. |
+| **4** | **Rule 0 (`Publish Customer Role Change Message Data Script`)** & **IO (`WP MF Get PO Config IO`)** | Data Config / Siebel Tools | Uses `EventName = MerchantPromotedEventDbScript` and extracts all `Customer Roles` without status filtering. | **No changes required** (assuming downstream consumers accept the same `EventName` for all trading status updates). |
 
-        TheApplication().Trace("---------------------------------------");
+---
+
+## 4. Sample Kafka Payload (`CustomerRoles` Segment)
+
+    {
+      "EventName": "MerchantPromotedEventDbScript",
+      "CalledFrom": "Workflow : WP Kafka Send Trading Status Datafix Update",
+      "Party": {
+        "Id": "<Merchant_Account_Row_Id>",
+        "CustomerRoles": [
+          {
+            "Id": "<Role_Row_Id>",
+            "RoleStatus": "CLOSED",
+            "RoleValue": "MERCHANT",
+            "RoleType": "TRA",
+            "ValidFrom": "01/01/2023",
+            "ValidTo": ""
+          }
+        ]
+      }
     }
-}
+
+---
+
+## 5. Open Points / Questions for Business & Architecture (To be confirmed)
+1. **Data Script Location & Trigger Mechanism:** Where is the existing data script stored, and how does it invoke the workflow after populating `WP Customer Roles Audit`?
+2. **Exact List of Target Statuses:** Which specific `Role Status` LIC values (beyond `LIVE`, `CLOSED`, `SUSPENDED`) should be included in the `Check Rule Live?` decision point?
+3. **Kafka Event Name (`EventName`):** Should `CLOSED` and `SUSPENDED` merchants be published under the existing `MerchantPromotedEventDbScript` event name (with the updated `RoleStatus` in the payload), or do downstream systems require a separate `EventName` / topic?
+4. **`Valid To` Date Handling for `CLOSED` Status:** When a merchant's trading status changes to `CLOSED`, is the `Valid To` field populated with a past/current date?
