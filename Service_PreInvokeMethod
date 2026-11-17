@@ -1,45 +1,51 @@
-// Business Service - obsługa metod
-function Service_PreInvokeMethod(MethodName, Inputs, Outputs) {
-    var builder = new PropertySetBuilder();
+SELECT 
+    AD.ROW_ID AS AUDIT_ROW_ID,          -- <-- To wklejasz jako "Object Id" do Workflow!
+    TRA.PAR_ROW_ID AS PARTY_IDENTIFIER, -- [Party Identifier] (ROW_ID merchanta z S_ORG_EXT)
+    PO.NAME AS PO_NUMBER,
+    TRA.X_WP_ROLE_STATUS AS ROLE_STATUS,
+    TRA.ATTRIB_13 AS VALID_TO_DATE,     -- [Valid To]
+    AD.ATTRIB_08 AS BATCH_SEND_FLAG,
+    AD.CREATED AS AUDIT_CREATED
+FROM siebel.s_org_ext_xm TRA
+JOIN siebel.s_org_ext PO ON PO.ROW_ID = TRA.PAR_ROW_ID
+JOIN siebel.s_org_ext_xm AD ON AD.PAR_ROW_ID = TRA.PAR_ROW_ID
+WHERE TRA.TYPE = 'ROLE_ROLE_STATUS'
+  -- Twój nowy Search Spec z kroku Check Roles przetłumaczony 1:1 na SQL:
+  AND TRA.X_WP_ROLE = 'MERCHANT'
+  AND TRA.X_WP_ROLE_STATUS_TYPE = 'TRA'
+  AND (
+        (
+          (TRA.ATTRIB_13 IS NULL OR TRA.ATTRIB_13 >= TRUNC(SYSDATE))
+          AND (TRA.X_WP_ROLE_STATUS = 'LIVE' OR TRA.X_WP_ROLE_STATUS = 'SUSPENDED')
+        )
+        OR TRA.X_WP_ROLE_STATUS = 'CLOSED'
+      )
+  -- Dopięcie rekordu audytowego (bo WF startuje z WP Customer Roles Audit):
+  AND AD.TYPE = 'ROLE_ROLE_STATUS_AUDIT'
+  -- Opcjonalnie zawężenie od razu do CLOSED, żeby przetestować nowy przypadek:
+  AND TRA.X_WP_ROLE_STATUS = 'CLOSED'
+ORDER BY TRA.ATTRIB_13 ASC NULLS LAST, AD.CREATED DESC
+FETCH FIRST 10 ROWS ONLY;
 
-    if (MethodName == "BuildPropertySet") {
-        builder.buildFromInputs(Inputs);
-        Outputs.AddChild(builder.get());
-        return CancelOperation;
-    }
-    
-    if (MethodName == "GetPropertySet") {
-        var name = Inputs.GetProperty("Name");
-        var propertySet = builder.getPropertySet(name);
-        if (propertySet) Outputs.AddChild(propertySet);
-        return CancelOperation;
-    }
 
-    if (MethodName == "SetProperty") {
-        var name = Inputs.GetProperty("Name");
-        var properties = Inputs.GetProperty("Properties");
-        builder.setProperties(name, properties);
-        return CancelOperation;
-    }
+SELECT 
+    TRA.PAR_ROW_ID AS PARTY_IDENTIFIER,
+    PO.NAME AS PO_NUMBER,
+    TRA.ROW_ID AS TRA_ROLE_ROW_ID,
+    TRA.X_WP_ROLE_STATUS AS ROLE_STATUS,
+    TRA.ATTRIB_13 AS VALID_TO_DATE
+FROM siebel.s_org_ext_xm TRA
+JOIN siebel.s_org_ext PO ON PO.ROW_ID = TRA.PAR_ROW_ID
+WHERE TRA.TYPE = 'ROLE_ROLE_STATUS'
+  AND TRA.X_WP_ROLE = 'MERCHANT'
+  AND TRA.X_WP_ROLE_STATUS_TYPE = 'TRA'
+  AND TRA.X_WP_ROLE_STATUS = 'CLOSED'
+ORDER BY TRA.ATTRIB_13 ASC NULLS LAST
+FETCH FIRST 10 ROWS ONLY;
 
-    if (MethodName == "GetProperty") {
-        var name = Inputs.GetProperty("Name");
-        var key = Inputs.GetProperty("Key");
-        var value = builder.getProperty(name, key);
-        if (value !== null) Outputs.SetProperty("Value", value);
-        return CancelOperation;
-    }
 
-    if (MethodName == "GetAllProperties") {
-        var name = Inputs.GetProperty("Name");
-        var allProps = builder.getAllProperties(name);
-        if (allProps) {
-            for (var key in allProps) {
-                Outputs.SetProperty(key, allProps[key]);
-            }
-        }
-        return CancelOperation;
-    }
-
-    return ContinueOperation;
-}
+UPDATE siebel.s_org_ext_xm 
+SET ATTRIB_08 = 'Y' 
+WHERE ROW_ID = '<wklej_tutaj_AUDIT_ROW_ID>' 
+  AND TYPE = 'ROLE_ROLE_STATUS_AUDIT';
+COMMIT;
