@@ -1,183 +1,254 @@
-function deleteData(Inputs, Outputs)
-{
-    var wfSvc = null;
-    var psIn = null;
-    var psOut = null;
-    
-    var isUIContext = false;
-    var activeBO = null;
-    var boContactStandalone = null;
-    var bcContact = null;
+# KN-384 – Spike: Closed SR Kafka Trigger Logic (for KN-370)
 
-    var currentContactId = "";
-    var integrationId = "";
-    
-    var onePortalProfileId = "";
-    var onePortalMultiCompany = "";
-    var date = null;
-    var endDateTime = "";
+**Env checked:** J2 (`SIEBEL.S_SRV_REQ`, Siebel Tools / Web Tools, Administration - Runtime Events)  
+**Related:** KN-370 (Automation: SR Closed event trigger logic change)
 
-    try 
-    {
-        fnLog("=============================================");
-        fnLog("| deleteData - START                        |");
-        fnLog("=============================================");
-        fnLog("Inputs: \n" + app.TMODumpPropSet(Inputs));
+## Context & What's Actually Happening
 
-        wfSvc = app.GetService("Workflow Process Manager");
+The ticket asks to switch the Closed SR Kafka trigger from looking at `LAST_UPD` to using `STATUS_SET_DT` instead.
 
-        // ==============================================
-        // 1. POBRANIE DANYCH Z INPUTS (Bez ProfileAttr!)
-        // ==============================================
-        var rowData = Inputs.GetChild(0);
-        if (rowData) {
-            integrationId = rowData.GetProperty("Integration Id");
-            currentContactId = rowData.GetProperty("Contact Id");
-        }
+After digging through the RTE config and BC User Properties, **nothing in the trigger actually checks `LAST_UPD`**. The current setup is much simpler:
 
-        if (!currentContactId || currentContactId === "") {
-            app.RaiseErrorText("Brak identyfikatora osoby kontaktowej podczas usuwania rekordu!");
-        }
+* RTE on `WriteRecordUpdated` (Seq `0`) fires Action Set **`Call Event BS Async`** across 6 SR-related BCs whenever `LookupValue("WP_KAFKA_PUBLISH_SWITCH","KAFKA_SR_SWITCH")="SR_TOGGLE_ON"`.
+* Inside `Call Event BS Async`, Seq `1` (`Call Event`) invokes `KafkaSendEventAsync` (`Named Method 70` -> `WP Invoke Kafka Rule Set`) with just one condition:
+  ```text
+  [Status] = "Closed"
+  ```
 
-        // ==============================================
-        // 2. USTALENIE KONTEKSTU (UI vs Tło)
-        // ==============================================
-        activeBO = app.ActiveBusObject();
+Because there is no state-transition check in the RTE (and no deduplication downstream in `WP Invoke Kafka Rule Set`), any subsequent edit to an already-closed SR triggers `WriteRecordUpdated`, matches `[Status] = "Closed"`, and pushes a duplicate Kafka event. From the outside it looks like `LAST_UPD` is driving the trigger, which is where the Jira wording came from.
 
-        if (activeBO !== null && activeBO.Name() === "Account") {
-            bcContact = activeBO.GetBusComp("Contact");
-            isUIContext = true;
-            fnLog("| UI Context - Znaleziono BO Account");
-        }
+Also verified the field mapping: external `STATUS_SET_DT` maps to Siebel's **`SR Status Date`** (`S_SRV_REQ.SR_STAT_DT`).
 
-        if (!isUIContext) {
-            boContactStandalone = app.GetBusObject("Contact");
-            bcContact = boContactStandalone.GetBusComp("Contact");
-            
-            bcContact.SetViewMode(AllView);
-            bcContact.ClearToQuery();
-            bcContact.ActivateField("TMO Profile Id");
-            bcContact.ActivateField("Account Integration Id");
-            bcContact.SetSearchSpec("Id", currentContactId);
-            bcContact.ExecuteQuery(ForwardOnly);
+---
 
-            if (!bcContact.FirstRecord()) {
-                app.RaiseErrorText("Nie znaleziono osoby kontaktowej w bazie!");
-            }
-            fnLog("| Not UI Context (Użyto Standalone BO)");
-        }
+## 1. Checking `SR_STAT_DT` (`SR Status Date`)
 
-        // Pobranie atrybutów profilu bezpośrednio z Contact BC
-        onePortalProfileId = bcContact.GetFieldValue("TMO Profile Id");
-        onePortalMultiCompany = bcContact.GetFieldValue("Account Integration Id");
+### 1.1 Data check on J2
 
-        fnLog("Contact Id: " + currentContactId);
-        fnLog("Profile Id: " + onePortalProfileId);
-        fnLog("MultiCompany: " + onePortalMultiCompany);
-        fnLog("Integration Id (Role): " + integrationId);
+I ran two queries on J2 against closed SRs where `TRUNC(LAST_UPD) > TRUNC(CREATED)` to see if `SR_STAT_DT` actually gets updated on closure and whether it carries a real timestamp (or just a date from `PreDefault = System: Today`).
 
-        // ==============================================
-        // 3. PATCH - DEZAKTYWACJA ROLI (DELETE)
-        // ==============================================
-        date = Date.fromSystem(Clib.time());
-        endDateTime = Clib.rsprintf("%04d-%02d-%02dT%02d:%02d:%02d.000Z",
-            date.getFullYear(), date.getMonth() + 1, date.getDate(),
-            date.getHours(), date.getMinutes(), date.getSeconds()
-        );
+**Query 1 – All historical multi-day closed SRs**
 
-        fnLog("Calling PATCH /permissions - deactivate value");
-        var requestPS = app.NewPropertySet();
-        requestPS.SetType("Request");
-        
-        var validForPS = app.NewPropertySet();
-        validForPS.SetType("validFor");
-        
-        var endDateTimePS = app.NewPropertySet();
-        endDateTimePS.SetType("endDateTime");
-        endDateTimePS.SetValue(endDateTime);
-        
-        validForPS.AddChild(endDateTimePS);
-        requestPS.AddChild(validForPS);
-        requestPS.SetProperty("status", "inactive");
+```sql
+SELECT
+    COUNT(*) AS TOTAL_CLOSED_M_D,
+    SUM(CASE WHEN SR_STAT_DT IS NULL THEN 1 ELSE 0 END) AS STAT_DT_IS_NULL,
+    SUM(CASE WHEN TRUNC(SR_STAT_DT) = TRUNC(CREATED) THEN 1 ELSE 0 END) AS SAME_AS_CREATED_DAY,
+    SUM(CASE WHEN TRUNC(SR_STAT_DT) > TRUNC(CREATED) THEN 1 ELSE 0 END) AS UPDATED_AFTER_CREATED,
+    SUM(CASE WHEN TO_CHAR(SR_STAT_DT, 'HH24:MI:SS') <> '00:00:00' THEN 1 ELSE 0 END) AS HAS_TIME_COMPONENT
+FROM SIEBEL.S_SRV_REQ
+WHERE SR_STAT_ID = 'Closed'
+  AND TRUNC(LAST_UPD) > TRUNC(CREATED);
+```
 
-        psIn = app.NewPropertySet();
-        psOut = app.NewPropertySet();
-        psIn.SetProperty("ProcessName", "TMO permissionsUpdate MAPI");
-        psIn.SetProperty("Input_Id", integrationId);
-        psIn.AddChild(requestPS);
+Results (J2):
 
-        wfSvc.InvokeMethod("RunProcess", psIn, psOut);
-        fnLog("PATCH Permissions Output: \n" + app.TMODumpPropSet(psOut));
+| TOTAL_CLOSED_M_D | STAT_DT_IS_NULL | SAME_AS_CREATED_DAY | UPDATED_AFTER_CREATED | HAS_TIME_COMPONENT |
+| :---: | :---: | :---: | :---: | :---: |
+| 14,329 | 1,904 (13.3%) | 4,661 (32.5%) | 1,685 (11.8%) | 6,970 (48.6%) |
 
-        // ==============================================
-        // 4. GET - SPRAWDZENIE CZY ZOSTAŁY INNE ROLE
-        // ==============================================
-        fnLog("Calling GET - check if deleted role was last");
-        psIn.Reset();
-        psOut.Reset();
-        
-        psIn.SetProperty("ProcessName", "TMO permissions MAPI");
-        psIn.SetProperty("Input_TMOSSOID", onePortalProfileId);
-        psIn.SetProperty("Input_AccountIntegrationId", onePortalMultiCompany);
-        psIn.SetProperty("Input_Fields", "assetRoles.role.id");
-        
-        wfSvc.InvokeMethod("RunProcess", psIn, psOut);
+Two things stood out when checking sample rows:
+1. Almost half the records (`6,970`) came back with `23:00:00` instead of `00:00:00` — that's just UK BST midnight stored in UTC, not an actual status-change timestamp. That also explains the missing `6,079` rows in the day buckets (`TRUNC(SR_STAT_DT)` ends up being `CREATED - 1 day` during summer).
+2. `UPDATED_AFTER_CREATED` (`1,685`) almost matched the subset of records that also had `ACT_CLOSE_DT` populated.
 
-        var respBody = null;
-        if (psOut.GetChildCount() > 0 && psOut.GetChild(0).GetChildCount() > 0) {
-            var restResponse = psOut.GetChild(0).GetChild(0);
-            if (restResponse.GetChildCount() > 0) {
-                respBody = restResponse.GetChild(0);
-            }
-        }
+To confirm that, I split the last 12 months by whether `ACT_CLOSE_DT` is populated and excluded both `00:00:00` and `23:00:00`.
 
-        // ==============================================
-        // 5. DELETE I UPDATE KONTAKTU (Jeśli brak ról)
-        // ==============================================
-        if (respBody === null || respBody.GetType() !== "ListOfRespBody" || respBody.GetChildCount() === 0) 
-        {
-            fnLog("No roles found for profile. Removing adminCompany from profile...");
-            
-            psIn.Reset();
-            psOut.Reset();
-            
-            psIn.SetProperty("ProcessName", "TMO profileManagementDelete MAPI");
-            psIn.SetProperty("Input_Contact_SSO_Id", onePortalProfileId);
-            psIn.SetProperty("Input_Contat_Integration_Id", onePortalMultiCompany);
-            
-            wfSvc.InvokeMethod("RunProcess", psIn, psOut);
-            fnLog("DELETE Profile Output: \n" + app.TMODumpPropSet(psOut));
+**Query 2 – Last 12 months split by `ACT_CLOSE_DT` (excluding BST `23:00:00` offset)**
 
-            // Czyszczenie pola na nadrzędnym BC Contact (bezpieczne dzięki detekcji UI)
-            bcContact.SetFieldValue("TMO Multiparty Company", "");
-            bcContact.WriteRecord();
-            
-            fnLog("adminCompany removed from OnePortal profile and Contact BC updated.");
-        } 
-        else 
-        {
-            fnLog("Roles still exist for profile. adminCompany will not be removed.");
-        }
+```sql
+SELECT
+    CASE WHEN ACT_CLOSE_DT IS NULL THEN 'NO_ACT_CLOSE_DT' ELSE 'HAS_ACT_CLOSE_DT' END AS CLOSE_PATH,
+    COUNT(*) AS TOTAL_CLOSED,
+    SUM(CASE WHEN SR_STAT_DT IS NULL THEN 1 ELSE 0 END) AS STAT_DT_IS_NULL,
+    SUM(CASE WHEN TRUNC(SR_STAT_DT) = TRUNC(CREATED) THEN 1 ELSE 0 END) AS SAME_AS_CREATED_DAY,
+    SUM(CASE WHEN TRUNC(SR_STAT_DT) > TRUNC(CREATED) THEN 1 ELSE 0 END) AS UPDATED_AFTER_CREATED,
+    SUM(CASE WHEN TO_CHAR(SR_STAT_DT, 'HH24:MI:SS') NOT IN ('00:00:00', '23:00:00') THEN 1 ELSE 0 END) AS HAS_TIME_COMPONENT
+FROM SIEBEL.S_SRV_REQ
+WHERE SR_STAT_ID = 'Closed'
+  AND TRUNC(LAST_UPD) > TRUNC(CREATED)
+  AND CREATED >= ADD_MONTHS(SYSDATE, -12)
+GROUP BY CASE WHEN ACT_CLOSE_DT IS NULL THEN 'NO_ACT_CLOSE_DT' ELSE 'HAS_ACT_CLOSE_DT' END;
+```
 
-        Outputs.SetProperty("Status", "Success");
-    }
-    catch (e) 
-    {
-        fnLog("ERROR in deleteData: " + e.toString());
-        throw e;
-    }
-    finally 
-    {
-        if (!isUIContext && boContactStandalone) {
-            boContactStandalone = null;
-        }
-        bcContact = null;
-        activeBO = null;
-        psIn = null;
-        psOut = null;
-        wfSvc = null;
-        fnLog("=============================================");
-        fnLog("| deleteData - STOP                         |");
-        fnLog("=============================================");
-    }
-}
+Results (J2):
+
+| CLOSE_PATH | TOTAL_CLOSED | STAT_DT_IS_NULL | SAME_AS_CREATED_DAY | UPDATED_AFTER_CREATED | HAS_TIME_COMPONENT |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| `HAS_ACT_CLOSE_DT` | 63 (6.5%) | 4 | 5 | 53 (84.1%) | 0 |
+| `NO_ACT_CLOSE_DT` | 910 (93.5%) | 245 (26.9%) | 279 | 1 (0.1%) | 0 |
+
+What this tells us:
+* On the main closure path (`NO_ACT_CLOSE_DT`, 93.5% of closed SRs), `SR_STAT_DT` basically **never updates on close** — only 1 out of 910 rows got updated after creation. 245 are `NULL`, and the other 664 (279 same-day + 385 shifted by BST `23:00:00`) are still sitting on the creation date.
+* `HAS_TIME_COMPONENT` is **0** across the board. There is no real time component anywhere in `SR_STAT_DT`.
+
+### 1.2 Repository check (`On Field Update Set`) vs. active Kafka RTEs
+
+Checking `Business Component User Properties` in Siebel Tools (Flat view) for anything updating `SR Status Date` returns 7 BCs. Every single one is hardcoded to `Today()` (legacy config from 2015–2017):
+
+| BC | User Property | Value |
+| :--- | :--- | :--- |
+| `Related Service Request` | `On Field Update Set 3` | `"Status", "SR Status Date", "Today()"` |
+| `WP Service Request Task` | `On Field Update Set 9` | `"Status", "SR Status Date", "Today()"` |
+| `Service Request` | `On Field Update Set 9` | `"Status", "SR Status Date", "Today()"` |
+| `WP Service Request Thin` | `On Field Update Set 9` | `"Status", "SR Status Date", "Today()"` |
+| `WP MF Service Request Thin` | `On Field Update Set 9` | `"Status", "SR Status Date", "Today()"` |
+| `WP Rest Service Request` | `On Field Update Set 9` | `"Status", "SR Status Date", "Today()"` |
+| `WP Service Request Promotion` | `On Field Update Set 9` | `"Status", "SR Status Date", "Today()"` |
+
+Comparing that list against the **6 BCs wired to `Call Event BS Async`** (`WriteRecordUpdated`) explains the J2 numbers directly:
+
+| BC | Wired to `Call Event BS Async` RTE? | Has `On Field Update Set` (`Today()`)? | Notes |
+| :--- | :---: | :---: | :--- |
+| `Service Request` | Yes | Yes | Date-only (`Today()`) |
+| `WP Service Request Thin` | Yes | Yes | Date-only (worth verifying BC class — `CSSBusComp` ignores this UP) |
+| `WP MF Service Request Thin` | Yes | Yes | Date-only (same class caveat as above) |
+| `WP EAI Service Request` | **Yes** | **No** | Gap — Kafka RTE fires, `SR_STAT_DT` never updated |
+| `WP Related Service Request EAI BC` | **Yes** | **No** | Gap — Kafka RTE fires, `SR_STAT_DT` never updated |
+| `WP MF Related Service Request BC` | **Yes** | **No** | Gap — Kafka RTE fires, `SR_STAT_DT` never updated |
+| `Related Service Request` | No | Yes | Not in Kafka RTE |
+| `WP Service Request Task` | No | Yes | Not in Kafka RTE |
+| `WP Rest Service Request` | No | Yes | Not in Kafka RTE |
+| `WP Service Request Promotion` | No | Yes | Not in Kafka RTE |
+
+**Why we shouldn't base the trigger on `SR_STAT_DT`:**
+1. Half of the BCs firing `Call Event BS Async` (all EAI / Related ones) don't update `SR Status Date` at all. Filtering on it would drop valid closure events across ~93% of traffic.
+2. Even if we added the User Prop to those 3 BCs, `Today()` has no time part — any follow-up edit on the same day would still fire a duplicate event.
+3. BST stores midnight as `23:00:00` of the prior day in UTC, which creates edge-case mismatches around midnight if compared against `Today()`.
+4. Switching `SR Status Date` to `Timestamp()` would require repository changes and risks breaking existing reports or downstream integrations expecting a `DTYPE_DATE` value.
+
+---
+
+## 2. Proposed Solution for KN-370 (RTE-only, 2-Attribute Pattern)
+
+Rather than comparing dates, we can detect the actual transition of `[Status]` from non-`Closed` to `Closed` purely in `Administration - Runtime Events` (no repo/SRF changes), working consistently across all 6 BCs since `[Id]` and `[Status]` exist on all of them.
+
+### Why a 2-attribute design (`PreSetFieldValue` + `SetFieldValue`) is required
+
+A simpler single-attribute approach (setting `WP_KAFKA_SR_CLOSING_ID` directly in `PreSetFieldValue`) has a confirmed collision with existing parent/child SR logic:
+* On `Service Request`, existing RTE **`WP Closed SR Action Set`** fires on `WriteRecord` (Seq `-3`) — *before* `WriteRecordUpdated` (Seq `0`) — and invokes `ResumeParentSRs` when `WP_SR_CLOSED = "Y"`.
+* Checked `Service Request` BC User Properties: `ResumeParentSRs` is a `Named Method` calling `Workflow Process Manager` -> `RunProcess` **synchronously** in the same OM session (`WP Resume Related SR Parents Process` -> `WP Resume Service Request Process`).
+* That workflow queries parent SRs on `Service Request` (`[Status] = "Pending"`) and updates their `Status` to `"Open"`.
+* With a single attribute set on `PreSetFieldValue`, the parent SR's `Pending -> Open` transition would overwrite `WP_KAFKA_SR_CLOSING_ID` with the parent's `[Id]` and then clear it on the parent's `WriteRecordUpdated` — dropping the child SR's Kafka closure event.
+
+Splitting the state into two session attributes eliminates this collision completely:
+1. **`WP_KAFKA_SR_PRE_STATUS_ID`** — ephemeral buffer set during `PreSetFieldValue` only when the *old* status is not `"Closed"`, and immediately cleared in `SetFieldValue`.
+2. **`WP_KAFKA_SR_CLOSING_ID`** — set during `SetFieldValue` **only** when the *new* status is `"Closed"` and `WP_KAFKA_SR_PRE_STATUS_ID` matches `[Id]`. Because non-close transitions (like `ResumeParentSRs` setting `Pending -> Open`) never touch `WP_KAFKA_SR_CLOSING_ID`, the child SR's closing flag stays intact until its `WriteRecordUpdated` runs.
+
+**Why store `[Id]` instead of `"Y"`:** If a user changes status and hits a validation error or clicks `Undo Record` (or an EAI call fails in `PreWriteRecord` on a pooled session), `WriteRecordUpdated` never runs. A plain `"Y"` flag would leak in session memory and trigger a false duplicate on the next edit to another closed SR. Matching against `[Id]` isolates state per record with no extra RTE overhead.
+
+### 2.1 New Action Set 1: `WP Capture Kafka SR Pre-Status`
+
+* **Action Name:** `Set Pre-Status SR Id`
+* **Sequence:** `1`
+* **Active:** `Y`
+* **Action Type:** `Attribute Set`
+* **Profile Attribute:** `WP_KAFKA_SR_PRE_STATUS_ID`
+* **Set Operator:** `Set`
+* **Value:** `[Id]` *(evaluated as a Siebel expression, same pattern as existing `WP MAID Prof Attrib`)*
+* **Conditional Expression:**
+  ```text
+  [Status] IS NULL OR [Status] <> "Closed"
+  ```
+
+### 2.2 New Action Set 2: `WP Confirm Kafka SR Closing`
+
+1. **Seq `1` – `Set Closing SR Id`:**
+   * **Active:** `Y`
+   * **Action Type:** `Attribute Set`
+   * **Profile Attribute:** `WP_KAFKA_SR_CLOSING_ID`
+   * **Set Operator:** `Set`
+   * **Value:** `[Id]`
+   * **Conditional Expression:**
+     ```text
+     [Status] = "Closed" AND GetProfileAttr("WP_KAFKA_SR_PRE_STATUS_ID") = [Id]
+     ```
+
+2. **Seq `2` – `Reset Pre-Status SR Id`:**
+   * **Active:** `Y`
+   * **Action Type:** `Attribute Set`
+   * **Profile Attribute:** `WP_KAFKA_SR_PRE_STATUS_ID`
+   * **Set Operator:** `Set`
+   * **Value:** `""` *(empty string expression, same pattern as `WP Closed SR Action Set`)*
+   * **Conditional Expression:**
+     ```text
+     GetProfileAttr("WP_KAFKA_SR_PRE_STATUS_ID") = [Id]
+     ```
+
+### 2.3 New Runtime Events (`PreSetFieldValue` & `SetFieldValue` on `Status`)
+
+Add **12 rows** in `Administration - Runtime Events -> Events` (2 events for each of the 6 BCs already wired to `Call Event BS Async`):
+
+* **Object Type:** `BusComp`
+* **Object Names (6 BCs):**
+  * `Service Request`
+  * `WP EAI Service Request`
+  * `WP Service Request Thin`
+  * `WP Related Service Request EAI BC`
+  * `WP MF Service Request Thin`
+  * `WP MF Related Service Request BC`
+* **Conditional Expression (on all 12 events):**
+  ```text
+  LookupValue("WP_KAFKA_PUBLISH_SWITCH","KAFKA_SR_SWITCH")="SR_TOGGLE_ON"
+  ```
+
+| Event | Subevent | Sequence | Action Set Name |
+| :--- | :--- | :---: | :--- |
+| `PreSetFieldValue` | `Status` | `0` | `WP Capture Kafka SR Pre-Status` |
+| `SetFieldValue` | `Status` | `0` | `WP Confirm Kafka SR Closing` |
+
+### 2.4 Update Existing Action Set: `Call Event BS Async`
+
+1. **Modify Seq `1` (`Call Event`, Invoke Method `KafkaSendEventAsync`):**  
+   Change `Conditional Expression` from:
+   ```text
+   [Status] = "Closed"
+   ```
+   to:
+   ```text
+   [Status] = "Closed" AND GetProfileAttr("WP_KAFKA_SR_CLOSING_ID") = [Id]
+   ```
+
+2. **Add Seq `2` (`Reset Kafka SR Closing Id`):**
+   * **Active:** `Y`
+   * **Action Type:** `Attribute Set`
+   * **Profile Attribute:** `WP_KAFKA_SR_CLOSING_ID`
+   * **Set Operator:** `Set`
+   * **Value:** `""`
+   * **Conditional Expression:**
+     ```text
+     GetProfileAttr("WP_KAFKA_SR_CLOSING_ID") = [Id]
+     ```
+
+*(Remember to reload Runtime Events after applying the changes.)*
+
+### 2.5 Edge Cases Walkthrough
+
+* **Editing another field on a Closed SR (e.g. `New`):** Neither `PreSetFieldValue` nor `SetFieldValue` on `Status` fires -> `WP_KAFKA_SR_CLOSING_ID` is empty -> no Kafka event.
+* **EAI re-sending `Status = "Closed"` on an already-closed SR:** Old `[Status]` is already `"Closed"` during `PreSetFieldValue` -> `WP_KAFKA_SR_PRE_STATUS_ID` is not set -> `SetFieldValue` skips setting `WP_KAFKA_SR_CLOSING_ID` -> no duplicate.
+* **Normal close (`Open`/`Pending` -> `Closed`):** `PreSetFieldValue` stores `[Id]` in `PRE` -> `SetFieldValue` promotes `[Id]` to `CLOSING_ID` and clears `PRE` -> `WriteRecordUpdated` Seq `1` fires `KafkaSendEventAsync` -> Seq `2` clears `CLOSING_ID`.
+* **Closing a Child SR that triggers `ResumeParentSRs` (nested synchronous WF):**
+  1. Child SR (`Open` -> `Closed`) sets `WP_KAFKA_SR_CLOSING_ID = Child_Id` and clears `PRE`.
+  2. During Child `WriteRecord` (Seq `-3`), `ResumeParentSRs` synchronously updates Parent SR (`Pending` -> `Open`).
+  3. Parent SR sets `PRE = Parent_Id`, then `SetFieldValue` sees `[Status] = "Open"` (not `"Closed"`), leaves `CLOSING_ID` untouched, and clears `PRE`.
+  4. Parent `WriteRecordUpdated` Seq `2` checks `CLOSING_ID = Parent_Id` -> `FALSE` (`Child_Id <> Parent_Id`), so `Child_Id` survives.
+  5. Control returns to Child `WriteRecordUpdated` -> Seq `1` matches `Child_Id`, fires Kafka once, and Seq `2` resets `CLOSING_ID`.
+* **Status change to non-Closed (`Open` -> `Pending`) + Save:** `SetFieldValue` leaves `CLOSING_ID` empty and clears `PRE` immediately.
+* **Validation error / Undo on SR A after changing status to `Closed`, then edit on already-closed SR B:** Leftover `CLOSING_ID` holds SR A's `[Id]`, which doesn't match SR B's `[Id]` -> no false trigger.
+
+### 2.6 Concurrency, Batch Processing & Known Boundaries
+
+* **High concurrency across multiple sessions (tens/hundreds of simultaneous SR closures):** Completely isolated with no race conditions. Siebel Profile Attributes are stored strictly in memory per Object Manager task/session (never persisted to the DB or shared across users, EAI OM threads, or Siebel servers). Performance overhead is negligible (in-memory reads/writes, zero SQL, and filtered by `Subevent = Status` so the new RTEs don't fire on unrelated field updates). The actual throughput bottleneck remains downstream (`KafkaSendEventAsync` / `S_SRM_REQUEST` / WfProcMgr), which will see *lower* overall load once duplicates are eliminated.
+* **Bulk / batch closures within a single session (EAI batches, loops, batch WFs):** Safe for standard sequential processing. Because a single Siebel OM session is single-threaded, each record finishes its full `PreSetFieldValue -> SetFieldValue -> WriteRecordUpdated` cycle (sending Kafka and resetting `WP_KAFKA_SR_CLOSING_ID` to `""`) before the next SR in the batch is processed.
+* **Single-session boundaries (nested/interleaved closures):** Because Profile Attributes have a single slot per session, there are two edge cases where state would be overwritten inside the same session:
+  1. *Synchronous cascading closures (`Closed` triggering another `Closed`):* If any synchronous workflow/script executed inside `WriteRecord` closes a *second* SR on one of the 6 wired BCs before the outer SR's `WriteRecordUpdated` completes (similar to `ResumeParentSRs`, except transitioning to `"Closed"` instead of `"Open"`), the inner SR would overwrite and clear `WP_KAFKA_SR_CLOSING_ID`, dropping the outer SR's Kafka event. (Current `ResumeParentSRs` only resumes parents to `"Open"`, so it is unaffected.)
+  2. *Interleaved uncommitted BC instances in custom eScript:* Setting `Status = "Closed"` on two separate BC instances before calling `WriteRecord()` on either of them. Standard UI, EAI Siebel Adapter, and Workflows don't do this.
+  * *Fallback option:* If a synchronous cascading closure (`Closed -> Closed`) is confirmed to exist in the codebase, state tracking should be moved from session-level Profile Attributes to record/BC-instance level (e.g., via BC Server Script / non-persistent flag on the 6 BCs) rather than pure RTE.
+
+---
+
+## 3. Notes & Follow-ups
+
+* **Why not reuse `WP_SR_CLOSED`:** `WP Closed SR Action Set` resets `WP_SR_CLOSED` right after calling `ResumeParentSRs` (still inside `WriteRecord`), so it's already empty by the time `WriteRecordUpdated` executes. It also only covers `Service Request` and `Related Service Request`, not the Thin/EAI BCs.
+* **Pre-implementation check (KN-370):** Confirm with the team whether any synchronous `WriteRecord`/`PreWriteRecord` logic performs cascading SR closures (`Closed -> Closed`) in the same session, and run a smoke test in dev across `WP EAI Service Request`, one `Thin` BC, and a parent/child SR closure.
+* **Scope parity (`WriteRecordNew` / EIM):** SRs inserted directly as `Closed` fire `WriteRecordNew` (not `WriteRecordUpdated`), and EIM/direct SQL bypasses BC events — both behave the same as today.
+* **Data quality follow-up (separate from KN-370):** If downstream Kafka consumers rely on `STATUS_SET_DT` in the payload being populated on EAI closures, adding `On Field Update Set` to the 3 missing BCs (`WP EAI Service Request`, `WP Related Service Request EAI BC`, `WP MF Related Service Request BC`) should be logged as a separate ticket.
